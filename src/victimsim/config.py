@@ -10,6 +10,13 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
 SOUNDS_DIR = REPO_ROOT / "assets" / "sounds"
 MODELS_DIR = REPO_ROOT / "assets" / "models"
 
+# Vosk model directory name per language — must match what
+# scripts/download_vosk_model.sh fetches into assets/models/.
+MODEL_NAMES = {
+    "en": "vosk-model-small-en-us-0.15",
+    "de": "vosk-model-small-de-0.15",
+}
+
 
 @dataclass
 class AudioConfig:
@@ -24,9 +31,35 @@ class AudioConfig:
 
 @dataclass
 class TriggerConfig:
-    keywords: list[str] = field(default_factory=list)
+    keywords: dict[str, list[str]] = field(default_factory=dict)
     cooldown_seconds: float = 6.0
     response_categories: list[str] = field(default_factory=lambda: ["shout", "cry", "moan"])
+
+    def keywords_for(self, language: str) -> list[str]:
+        return self.keywords.get(language, self.keywords.get("en", []))
+
+
+@dataclass
+class SpontaneousProfile:
+    """Parameters for a self-triggering "victim calls out on its own" mode."""
+
+    interval_min_seconds: float = 20.0
+    interval_max_seconds: float = 60.0
+    volume_multiplier: float = 1.0
+    response_categories: list[str] = field(default_factory=lambda: ["shout", "cry", "moan"])
+    knock_probability: float = 0.5
+
+
+@dataclass
+class BehaviorConfig:
+    mode: str = "responsive"  # responsive | distress | weak
+    profiles: dict[str, SpontaneousProfile] = field(default_factory=dict)
+
+    def active_profile(self) -> SpontaneousProfile | None:
+        """None means "responsive": no self-triggering, use base trigger/knock config."""
+        if self.mode == "responsive":
+            return None
+        return self.profiles.get(self.mode, SpontaneousProfile())
 
 
 @dataclass
@@ -40,15 +73,35 @@ class KnockConfig:
 class Config:
     audio: AudioConfig
     trigger: TriggerConfig
+    behavior: BehaviorConfig
     knock: KnockConfig
+    language: str = "en"
     volume: float = 0.9
 
+    @property
+    def model_name(self) -> str:
+        if self.language not in MODEL_NAMES:
+            raise ValueError(
+                f"Unsupported language '{self.language}'. Known: {list(MODEL_NAMES)}"
+            )
+        return MODEL_NAMES[self.language]
+
     @classmethod
-    def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> "Config":
-        raw = yaml.safe_load(path.read_text())
+    def load(cls, path: Path | str = DEFAULT_CONFIG_PATH) -> "Config":
+        raw = yaml.safe_load(Path(path).read_text())
+
+        behavior_raw = raw.get("behavior", {})
+        profiles = {
+            name: SpontaneousProfile(**profile_raw)
+            for name, profile_raw in behavior_raw.get("profiles", {}).items()
+        }
+        behavior = BehaviorConfig(mode=behavior_raw.get("mode", "responsive"), profiles=profiles)
+
         return cls(
             audio=AudioConfig(**raw.get("audio", {})),
             trigger=TriggerConfig(**raw.get("trigger", {})),
+            behavior=behavior,
             knock=KnockConfig(**raw.get("knock", {})),
+            language=raw.get("language", "en"),
             volume=raw.get("volume", 0.9),
         )

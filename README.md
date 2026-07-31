@@ -1,9 +1,10 @@
 # Responsive Victim Simulator
 
 A training aid for search-and-rescue exercises: a Raspberry Pi listens for
-rescuers ("Hello? Anyone there?") and responds with a victim sound (shout,
-cry, moan) through a loudspeaker, and can drive a knock transducer as a
-secondary cue.
+rescuers ("Hello? Anyone there?" / German supported too) and responds with a
+victim sound (shout, cry, moan) through a loudspeaker, and can drive a knock
+transducer as a secondary cue. It can also be switched into a mode where the
+victim calls out and knocks on its own, without waiting to be spoken to.
 
 ## How it works
 
@@ -11,10 +12,13 @@ secondary cue.
 ReSpeaker Lite (USB mic array)
         |
         v
-  KeywordListener (Vosk, offline speech recognition)
-        |  keyword detected ("hello", "rescue", ...)
+  KeywordListener (Vosk, offline speech recognition, en or de)
+        |  keyword detected ("hello"/"hallo", "rescue"/"rettung", ...)
         v
      Responder  --cooldown-->  SoundBank (random clip, no immediate repeat)
+        ^
+        |  (distress/weak modes only)
+  SpontaneousCaller -- random-interval timer, self-triggers Responder
         |
         v
   stereo mix: voice -> left channel, knock -> right channel
@@ -27,16 +31,53 @@ While a response is playing, the listener is muted (see `Responder.busy` in
 [`src/victimsim/responder.py`](src/victimsim/responder.py)) so the sim
 doesn't hear and re-trigger on itself — there's no hardware AEC in this v1.
 
+## Language
+
+Set `language: en` or `language: de` in [`config.yaml`](config.yaml). This
+picks both the keyword list under `trigger.keywords` and the Vosk model
+(`assets/models/vosk-model-small-en-us-0.15` or `-de-0.15`). Download the
+model for whichever language(s) you use:
+
+```bash
+bash scripts/download_vosk_model.sh en
+bash scripts/download_vosk_model.sh de
+```
+
+Add more phrases by editing `trigger.keywords.en` / `trigger.keywords.de` in
+`config.yaml` (case-insensitive substring match against what Vosk hears).
+
+## Behavior modes
+
+`behavior.mode` in `config.yaml` controls how "alive" the victim is:
+
+- **`responsive`** (default) — only reacts when it hears a keyword.
+- **`distress`** — additionally calls out on its own (shout/cry/moan + knock)
+  at normal strength, on a random timer (`interval_min_seconds` /
+  `interval_max_seconds` under `behavior.profiles.distress`). Simulates a
+  victim actively shouting and knocking for help.
+- **`weak`** — same idea, but rarely (much longer interval) and at reduced
+  volume, restricted to weaker-sounding categories (moan/cry, no shout), and
+  a lower knock chance. Simulates an exhausted/weak victim.
+
+In `distress`/`weak` modes, the listener keeps running too — the victim
+still responds to being spoken to directly, and does so at that mode's
+strength (a weak victim sounds weak whether it called out on its own or was
+just answered to). Tune the numbers per mode under `behavior.profiles` in
+`config.yaml`.
+
 ## Status as of today
 
 Built and smoke-tested on this dev laptop (not the Pi yet):
 - Project scaffolded, Python deps installed in `.venv`
 - Placeholder audio (synthesized tones, not real recordings) in `assets/sounds/`
-- Vosk small English model downloaded to `assets/models/`
+- Vosk small English *and* German models downloaded to `assets/models/`
 - `scripts/smoke_test.py` passes: clip loading, stereo mixing, device listing,
-  Vosk recognizer, and playback through the default output all work
-- **Not yet tested**: a real live "say hello, hear it respond" loop needs a
-  human at a mic — run `python -m victimsim.main` and try it interactively.
+  both languages' keyword lists, both Vosk models, `Responder` in all three
+  behavior modes, and the `SpontaneousCaller` background thread starting,
+  firing, and stopping cleanly
+- **Not yet tested**: a real live "say hello, hear it respond" loop, and a
+  real live distress/weak spontaneous-calling session, both need a human at
+  a mic — run `python -m victimsim.main` and try it interactively.
 
 ## Quickstart (dev laptop or Pi — same steps)
 
@@ -45,7 +86,7 @@ cd victim-simulator
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/generate_placeholder_sounds.py   # or drop in real recordings
-bash scripts/download_vosk_model.sh
+bash scripts/download_vosk_model.sh en                    # or: de
 PYTHONPATH=src .venv/bin/python -m victimsim.main --list-devices
 ```
 
@@ -57,8 +98,10 @@ substrings that uniquely match them. Then run it:
 PYTHONPATH=src .venv/bin/python -m victimsim.main
 ```
 
-Say "hello" (or any phrase in `trigger.keywords`) near the mic — it should
-respond with a random shout/cry/moan, and sometimes a knock.
+Say "hello" (or any phrase in `trigger.keywords.<language>`) near the mic —
+it should respond with a random shout/cry/moan, and sometimes a knock. Set
+`behavior.mode: distress` or `weak` in `config.yaml` to also have it call
+out on its own.
 
 If `sounddevice` fails to import with a `libportaudio` error, install
 PortAudio first (`sudo apt-get install libportaudio2`).
@@ -90,9 +133,13 @@ PortAudio first (`sudo apt-get install libportaudio2`).
 
 ## Running tests
 
+No pytest suite yet — what exists today is a non-interactive smoke test
+that exercises every module (config parsing, clip loading/mixing, both Vosk
+models, and the responder in all three behavior modes) without needing a
+live mic conversation:
+
 ```bash
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest
+.venv/bin/python scripts/smoke_test.py
 ```
 
 ## Replacing placeholder sounds
@@ -112,7 +159,8 @@ repeating the same clip twice in a row.
 - Keyword list is a blunt substring match on Vosk's transcription — works
   in quiet/moderate noise, may need retuning (or a fallback sound-level
   trigger) once tested in a realistic outdoor SAR training environment.
-- Single hardcoded English model; add more phrases/languages by editing
-  `trigger.keywords` in `config.yaml` and swapping the Vosk model.
+- Only English and German models are wired up; add more by extending
+  `MODEL_NAMES` in `src/victimsim/config.py`, the `case` in
+  `scripts/download_vosk_model.sh`, and a `trigger.keywords.<lang>` list.
 - Placeholder audio is synthesized, not recorded — plan a real
   voice-actor/foley session before using this for actual training exercises.

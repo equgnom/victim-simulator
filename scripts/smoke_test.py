@@ -6,6 +6,7 @@ mic conversation (useful in a headless sandbox / CI). Run the real thing with
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -13,10 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 
 from victimsim import audio_hal
-from victimsim.config import Config, MODELS_DIR
+from victimsim.config import Config, MODELS_DIR, MODEL_NAMES, SpontaneousProfile
+from victimsim.responder import Responder
 from victimsim.sound_bank import SoundBank
-
-MODEL_PATH = MODELS_DIR / "vosk-model-small-en-us-0.15"
+from victimsim.spontaneous import SpontaneousCaller
 
 
 def check(label, fn):
@@ -60,29 +61,64 @@ def main():
 
     check("list audio devices", _devices)
 
-    def _vosk_model_loads():
+    def _keywords_per_language():
+        for lang in ("en", "de"):
+            kws = config.trigger.keywords_for(lang)
+            assert kws, f"no keywords configured for '{lang}'"
+
+    check("keyword lists present for en + de", _keywords_per_language)
+
+    def _vosk_models_load():
         from vosk import KaldiRecognizer, Model, SetLogLevel
 
         SetLogLevel(-1)
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(MODEL_PATH)
-        model = Model(str(MODEL_PATH))
-        recognizer = KaldiRecognizer(model, config.audio.mic_sample_rate)
-        # Feed a second of silence — just proving the recognizer pipeline runs.
-        silence = np.zeros(config.audio.mic_sample_rate, dtype="int16").tobytes()
-        recognizer.AcceptWaveform(silence)
-        recognizer.FinalResult()
+        for lang, model_name in MODEL_NAMES.items():
+            model_path = MODELS_DIR / model_name
+            if not model_path.exists():
+                raise FileNotFoundError(f"[{lang}] {model_path}")
+            model = Model(str(model_path))
+            recognizer = KaldiRecognizer(model, config.audio.mic_sample_rate)
+            silence = np.zeros(config.audio.mic_sample_rate, dtype="int16").tobytes()
+            recognizer.AcceptWaveform(silence)
+            recognizer.FinalResult()
 
-    check("vosk model loads + processes audio", _vosk_model_loads)
+    check("vosk models load + process audio (en + de)", _vosk_models_load)
 
-    def _playback():
-        voice = audio_hal.load_clip(
-            SoundBank().pick("shout"), config.audio.playback_sample_rate
+    def _responder_per_mode():
+        for mode in ("responsive", "distress", "weak"):
+            config.behavior.mode = mode
+            responder = Responder(config, bank, None)
+            assert responder.ready()
+            responder.respond(f"smoke test ({mode})")
+            categories, knock_prob, volume = responder._strength_params()
+            assert categories
+            assert 0.0 <= knock_prob <= 1.0
+            assert volume > 0
+        config.behavior.mode = "responsive"
+
+    check("responder.respond() works in responsive/distress/weak modes", _responder_per_mode)
+
+    def _spontaneous_caller_runs():
+        config.behavior.mode = "distress"
+        responder = Responder(config, bank, None)
+        fast_profile = SpontaneousProfile(
+            interval_min_seconds=0.05,
+            interval_max_seconds=0.1,
+            volume_multiplier=0.2,
+            response_categories=["moan"],
+            knock_probability=0.0,
         )
-        stereo = audio_hal.mix_to_stereo(voice, None, "left", "right", 0.3)
-        audio_hal.play_blocking(stereo, config.audio.playback_sample_rate, None)
+        caller = SpontaneousCaller(responder, fast_profile)
+        caller.start()
+        time.sleep(0.5)
+        caller.stop()
+        # stop() only takes effect between calls, so if it fired mid-playback
+        # (clips run up to ~2.5s), give it enough headroom to finish + exit.
+        caller.join(timeout=5)
+        assert not caller.is_alive(), "SpontaneousCaller thread did not stop"
+        config.behavior.mode = "responsive"
 
-    check("play a clip through the default output device", _playback)
+    check("SpontaneousCaller starts, fires, and stops cleanly", _spontaneous_caller_runs)
 
     print("\nAll smoke checks passed.")
 

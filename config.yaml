@@ -5,6 +5,8 @@
 # output for the ReSpeaker Lite (input) and HiFiBerry (output) — run
 # `python -m victimsim.main --list-devices` to see exact names.
 
+language: de   # en | de — picks the keyword list below and which Vosk model to load
+
 audio:
   input_device: null       # e.g. "ReSpeaker" on the Pi
   output_device: null      # e.g. "snd_rpi_hifiberry" on the Pi
@@ -15,23 +17,55 @@ audio:
   knock_channel: right     # stereo output channel driving the knock transducer
 
 trigger:
-  # Substrings matched (case-insensitive) against recognized speech.
+  # Substrings matched (case-insensitive) against recognized speech, per language.
   keywords:
-    - "hello"
-    - "is anybody there"
-    - "anyone there"
-    - "can you hear me"
-    - "rescue"
-    - "search and rescue"
-  cooldown_seconds: 6      # minimum gap between responses, avoids spamming
+    en:
+      - "hello"
+      - "is anybody there"
+      - "anyone there"
+      - "can you hear me"
+      - "rescue"
+      - "search and rescue"
+    de:
+      - "hallo"
+      - "ist da jemand"
+      - "ist hier jemand"
+      - "hört mich jemand"
+      - "rettung"
+      - "rettungsdienst"
+  cooldown_seconds: 6      # minimum gap between any two responses, avoids spamming
   response_categories:     # random category chosen each time, then random clip within it
     - shout
     - cry
     - moan
 
+# Behavior mode:
+#   responsive - only reacts when it hears a keyword (default, current behavior)
+#   distress   - additionally calls out on its own at normal strength/frequency,
+#                simulating a victim actively shouting and knocking for help
+#   weak       - additionally calls out on its own, but rarely and at reduced
+#                volume/intensity, simulating an exhausted/weak victim
+# In "distress" and "weak" modes, the profile below also governs the strength
+# of keyword-triggered responses (a weak victim still sounds weak when spoken to).
+behavior:
+  mode: responsive
+  profiles:
+    distress:
+      interval_min_seconds: 20
+      interval_max_seconds: 60
+      volume_multiplier: 1.0
+      response_categories: [shout, cry, moan]
+      knock_probability: 0.6
+    weak:
+      interval_min_seconds: 90
+      interval_max_seconds: 240
+      volume_multiplier: 0.45
+      response_categories: [moan, cry]
+      knock_probability: 0.15
+
 knock:
   enabled: true
-  probability: 0.5         # chance a knock plays alongside the vocal response
+  probability: 0.5         # base knock chance for "responsive" mode
   clip: "knock1.wav"
 
 volume: 0.9
