@@ -1,0 +1,37 @@
+# Responsive Victim Simulator — configuration
+#
+# On the dev laptop, leave the device fields as null (uses system default
+# mic/speakers). On the Pi, set them to substrings that match `sd.query_devices()`
+# output for the ReSpeaker Lite (input) and HiFiBerry (output) — run
+# `python -m victimsim.main --list-devices` to see exact names.
+
+audio:
+  input_device: null       # e.g. "ReSpeaker" on the Pi
+  output_device: null      # e.g. "snd_rpi_hifiberry" on the Pi
+  mic_channels: 1          # set to 2 on the Pi if ReSpeaker Lite exposes a stereo capture device
+  mic_sample_rate: 16000   # Vosk wants 16kHz mono
+  playback_sample_rate: 44100
+  voice_channel: left      # stereo output channel carrying victim voice
+  knock_channel: right     # stereo output channel driving the knock transducer
+
+trigger:
+  # Substrings matched (case-insensitive) against recognized speech.
+  keywords:
+    - "hello"
+    - "is anybody there"
+    - "anyone there"
+    - "can you hear me"
+    - "rescue"
+    - "search and rescue"
+  cooldown_seconds: 6      # minimum gap between responses, avoids spamming
+  response_categories:     # random category chosen each time, then random clip within it
+    - shout
+    - cry
+    - moan
+
+knock:
+  enabled: true
+  probability: 0.5         # chance a knock plays alongside the vocal response
+  clip: "knock1.wav"
+
+volume: 0.9

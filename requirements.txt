@@ -1,0 +1,5 @@
+sounddevice>=0.4.6
+numpy>=1.24
+soundfile>=0.12
+vosk>=0.3.45
+PyYAML>=6.0
