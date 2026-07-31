@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
-# Downloads the small English Vosk model (~40MB) used for offline keyword
-# spotting. Same model works on the dev laptop and on the Pi 4B.
+# Downloads a small Vosk model for offline keyword spotting.
+#
+# Usage:
+#   bash scripts/download_vosk_model.sh        # English (default)
+#   bash scripts/download_vosk_model.sh en
+#   bash scripts/download_vosk_model.sh de      # German
 set -euo pipefail
+
+LANGUAGE="${1:-en}"
+
+case "$LANGUAGE" in
+  en) MODEL_NAME="vosk-model-small-en-us-0.15" ;;
+  de) MODEL_NAME="vosk-model-small-de-0.15" ;;
+  *)
+    echo "Unknown language '$LANGUAGE'. Supported: en, de" >&2
+    exit 1
+    ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODELS_DIR="$REPO_ROOT/assets/models"
-MODEL_NAME="vosk-model-small-en-us-0.15"
 URL="https://alphacephei.com/vosk/models/${MODEL_NAME}.zip"
 
 mkdir -p "$MODELS_DIR"

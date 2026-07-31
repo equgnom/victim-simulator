@@ -10,7 +10,14 @@ from .sound_bank import SoundBank
 
 
 class Responder:
-    """Owns the react-to-keyword logic: cooldown, random clip pick, playback."""
+    """Owns the react-to-keyword (and, in distress/weak modes, self-triggered)
+    logic: cooldown, random clip pick, playback.
+
+    In "responsive" mode, strength comes from the base `trigger`/`knock`
+    config. In "distress"/"weak" modes, the active behavior profile governs
+    strength (categories, volume, knock probability) for *all* responses,
+    keyword-triggered or spontaneous — a weak victim sounds weak either way.
+    """
 
     def __init__(self, config: Config, sound_bank: SoundBank, output_device: int | None):
         self.config = config
@@ -22,16 +29,35 @@ class Responder:
     def ready(self) -> bool:
         return (time.monotonic() - self._last_response_at) >= self.config.trigger.cooldown_seconds
 
-    def respond(self, matched_keyword: str, heard_text: str) -> None:
-        category = random.choice(self.config.trigger.response_categories)
+    def _strength_params(self) -> tuple[list[str], float, float]:
+        """Returns (response_categories, knock_probability, volume)."""
+        profile = self.config.behavior.active_profile()
+        if profile is None:
+            categories = self.config.trigger.response_categories
+            knock_probability = self.config.knock.probability
+            volume = self.config.volume
+        else:
+            categories = profile.response_categories
+            knock_probability = profile.knock_probability
+            volume = self.config.volume * profile.volume_multiplier
+
+        if not self.config.knock.enabled:
+            knock_probability = 0.0
+        return categories, knock_probability, volume
+
+    def respond(self, reason: str) -> None:
+        """`reason` is a short label for the log line, e.g. "heard 'hello'" or
+        "spontaneous call"."""
+        categories, knock_probability, volume = self._strength_params()
+
+        category = random.choice(categories)
         voice_path = self.sound_bank.pick(category)
         voice = audio_hal.load_clip(voice_path, self.config.audio.playback_sample_rate)
 
         knock = None
-        knock_cfg = self.config.knock
-        play_knock = knock_cfg.enabled and random.random() < knock_cfg.probability
+        play_knock = random.random() < knock_probability
         if play_knock:
-            knock_path = self.sound_bank.knock_clip(knock_cfg.clip)
+            knock_path = self.sound_bank.knock_clip(self.config.knock.clip)
             knock = audio_hal.load_clip(knock_path, self.config.audio.playback_sample_rate)
 
         stereo = audio_hal.mix_to_stereo(
@@ -39,13 +65,12 @@ class Responder:
             knock,
             self.config.audio.voice_channel,
             self.config.audio.knock_channel,
-            self.config.volume,
+            volume,
         )
 
         print(
-            f"[trigger] heard '{heard_text}' (matched '{matched_keyword}') "
-            f"-> playing {category}/{voice_path.name}"
-            + (f" + knock/{knock_cfg.clip}" if play_knock else "")
+            f"[{reason}] -> playing {category}/{voice_path.name}"
+            + (f" + knock/{self.config.knock.clip}" if play_knock else "")
         )
 
         self.busy.set()
