@@ -88,6 +88,13 @@ PortAudio first (`sudo apt-get install libportaudio2`).
 5. For auto-start on boot, wrap `python -m victimsim.main` in a systemd
    service (not set up yet — ask when you get there).
 
+## Running tests
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
 ## Replacing placeholder sounds
 
 `scripts/generate_placeholder_sounds.py` synthesizes rough stand-in tones
