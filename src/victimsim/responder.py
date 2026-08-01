@@ -19,10 +19,17 @@ class Responder:
     keyword-triggered or spontaneous — a weak victim sounds weak either way.
     """
 
-    def __init__(self, config: Config, sound_bank: SoundBank, output_device: int | None):
+    def __init__(
+        self,
+        config: Config,
+        sound_bank: SoundBank,
+        output_device: int | None,
+        state=None,  # victimsim.state.SharedState, optional (web dashboard log/status)
+    ):
         self.config = config
         self.sound_bank = sound_bank
         self.output_device = output_device
+        self.state = state
         self._last_response_at = 0.0
         self.busy = threading.Event()  # set while playing back; listener mutes on this
 
@@ -68,10 +75,13 @@ class Responder:
             volume,
         )
 
-        print(
+        log_line = (
             f"[{reason}] -> playing {category}/{voice_path.name}"
             + (f" + knock/{self.config.knock.clip}" if play_knock else "")
         )
+        print(log_line)
+        if self.state is not None:
+            self.state.add_log("response", log_line)
 
         self.busy.set()
         try:
@@ -81,3 +91,5 @@ class Responder:
         finally:
             self.busy.clear()
             self._last_response_at = time.monotonic()
+            if self.state is not None:
+                self.state.note_response(reason, category, play_knock)

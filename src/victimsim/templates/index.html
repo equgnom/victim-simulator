@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Victim Simulator</title>
+<style>
+  :root { color-scheme: dark light; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0; padding: 1rem 1rem 2rem;
+    background: #111; color: #eee;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem; margin-bottom: 1rem;
+  }
+  .card { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 0.75rem; }
+  .card .label { font-size: 0.7rem; color: #999; text-transform: uppercase; letter-spacing: 0.03em; }
+  .card .value { font-size: 1.05rem; margin-top: 0.3rem; word-break: break-word; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; margin-bottom: 1rem;
+    align-items: center; background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
+    padding: 0.75rem;
+  }
+  .field { display: flex; flex-direction: column; gap: 0.25rem; }
+  .field label { font-size: 0.75rem; color: #999; }
+  select, button, input[type=range] {
+    font-size: 1rem; padding: 0.4rem 0.5rem; border-radius: 6px;
+    border: 1px solid #444; background: #222; color: #eee;
+  }
+  input[type=range] { padding: 0; width: 140px; }
+  button { cursor: pointer; align-self: flex-end; }
+  button:hover { background: #333; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #error { color: #f66; font-size: 0.9rem; align-self: center; }
+  #log {
+    background: #000; border: 1px solid #333; border-radius: 8px;
+    padding: 0.5rem 0.75rem; height: 45vh; overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
+  }
+  .log-line { padding: 0.15rem 0; border-bottom: 1px solid #1a1a1a; }
+  .log-line .ts { color: #666; margin-right: 0.5rem; }
+  .kind-heard { color: #6cf; }
+  .kind-response { color: #6f6; }
+  .kind-cooldown { color: #fc6; }
+  .kind-system { color: #999; }
+  .dot { display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%; margin-right: 0.4em; }
+  .dot.ok { background: #4caf50; }
+  .dot.bad { background: #e53935; }
+</style>
+</head>
+<body>
+  <h1>Responsive Victim Simulator</h1>
+
+  <div class="grid">
+    <div class="card"><div class="label">Listener</div><div class="value" id="s-listener">-</div></div>
+    <div class="card"><div class="label">Uptime</div><div class="value" id="s-uptime">-</div></div>
+    <div class="card"><div class="label">Last heard</div><div class="value" id="s-last-heard">-</div></div>
+    <div class="card"><div class="label">Last response</div><div class="value" id="s-last-response">-</div></div>
+    <div class="card"><div class="label">Counts</div><div class="value" id="s-counts">-</div></div>
+    <div class="card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
+  </div>
+
+  <div class="controls">
+    <div class="field">
+      <label for="language">Language</label>
+      <select id="language">
+        <option value="en">English</option>
+        <option value="de">German</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="responsive">Responsive</option>
+        <option value="distress">Distress</option>
+        <option value="weak">Weak</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="volume">Volume</label>
+      <input type="range" id="volume" min="0" max="1" step="0.05">
+    </div>
+    <button id="trigger">Trigger now</button>
+    <span id="error"></span>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+let sinceTs = 0;
+const logEl = document.getElementById('log');
+const errEl = document.getElementById('error');
+
+function fmtTs(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+async function pollStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (!res.ok) return;
+    const s = await res.json();
+
+    document.getElementById('s-listener').innerHTML =
+      `<span class="dot ${s.listener_ready ? 'ok' : 'bad'}"></span>${s.listener_ready ? 'listening' : 'not ready'}`;
+    document.getElementById('s-uptime').textContent = Math.round(s.uptime_seconds) + 's';
+    document.getElementById('s-last-heard').textContent = s.last_heard
+      ? `"${s.last_heard.text}" (${fmtTs(s.last_heard.ts)})` : 'none yet';
+    document.getElementById('s-last-response').textContent = s.last_response
+      ? `${s.last_response.category}${s.last_response.knocked ? ' + knock' : ''} (${fmtTs(s.last_response.ts)})` : 'none yet';
+    document.getElementById('s-counts').textContent = `${s.heard_count} heard / ${s.response_count} responses`;
+    document.getElementById('s-temp').textContent = s.cpu_temp_c != null ? s.cpu_temp_c + ' °C' : 'n/a';
+
+    const active = document.activeElement && document.activeElement.id;
+    if (active !== 'language') document.getElementById('language').value = s.language;
+    if (active !== 'mode') document.getElementById('mode').value = s.mode;
+    if (active !== 'volume') document.getElementById('volume').value = s.volume;
+  } catch (e) {
+    // dashboard server briefly unreachable (e.g. mid-restart) — ignore, retry next tick
+  }
+}
+
+async function pollLog() {
+  try {
+    const res = await fetch(`/api/log?since=${sinceTs}`);
+    if (!res.ok) return;
+    const entries = await res.json();
+    for (const e of entries) {
+      sinceTs = Math.max(sinceTs, e.ts);
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `<span class="ts">${fmtTs(e.ts)}</span><span class="kind-${e.kind}">[${e.kind}]</span> ${e.message}`;
+      logEl.appendChild(line);
+    }
+    if (entries.length) logEl.scrollTop = logEl.scrollHeight;
+  } catch (e) {
+    // ignore, retry next tick
+  }
+}
+
+async function postJson(url, body) {
+  errEl.textContent = '';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      errEl.textContent = data.error || `request failed (${res.status})`;
+    }
+  } catch (e) {
+    errEl.textContent = 'request failed: server unreachable';
+  }
+}
+
+document.getElementById('language').addEventListener('change', e => postJson('/api/language', { language: e.target.value }));
+document.getElementById('mode').addEventListener('change', e => postJson('/api/mode', { mode: e.target.value }));
+document.getElementById('volume').addEventListener('change', e => postJson('/api/volume', { volume: parseFloat(e.target.value) }));
+document.getElementById('trigger').addEventListener('click', () => postJson('/api/trigger', {}));
+
+pollStatus();
+pollLog();
+setInterval(pollStatus, 2000);
+setInterval(pollLog, 1500);
+</script>
+</body>
+</html>

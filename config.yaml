@@ -68,4 +68,10 @@ knock:
   probability: 0.5         # base knock chance for "responsive" mode
   clip: "knock1.wav"
 
+# Web dashboard: status/log monitoring + live mode/language/volume control,
+# reachable from any device on the same WLAN as the Pi.
+web:
+  host: 0.0.0.0   # 0.0.0.0 = reachable over WLAN; use 127.0.0.1 to restrict to the Pi itself
+  port: 8080
+
 volume: 0.9

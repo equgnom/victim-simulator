@@ -46,13 +46,17 @@ class KeywordListener:
         mono = frames.mean(axis=1).astype(np.int16)
         return mono.tobytes()
 
-    def wait_for_keyword(self, mute_event=None) -> tuple[str, str]:
+    def wait_for_keyword(self, mute_event=None, reload_event=None) -> tuple[str, str] | None:
         """Blocks until a keyword is heard; returns (matched_keyword, full_text).
 
         If `mute_event` is set (a threading.Event), audio is still read to keep
         the stream alive, but discarded while it's set — used to mute listening
         while the victim's own response is playing, so it doesn't re-trigger on
         itself.
+
+        If `reload_event` is set (e.g. the web dashboard switched language),
+        returns None immediately so the caller can rebuild the listener with
+        the new language's model/keywords.
         """
         recognizer = KaldiRecognizer(self.model, self.samplerate)
         with sd.RawInputStream(
@@ -63,6 +67,8 @@ class KeywordListener:
             channels=self.channels,
         ) as stream:
             while True:
+                if reload_event is not None and reload_event.is_set():
+                    return None
                 data, _overflow = stream.read(self.block_size)
                 if mute_event is not None and mute_event.is_set():
                     continue

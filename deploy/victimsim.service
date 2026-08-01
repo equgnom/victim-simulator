@@ -1,0 +1,19 @@
+[Unit]
+Description=Responsive Victim Simulator
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/WorkingDirectory/Environment to match where you cloned the
+# repo and which user owns it (must be in the `audio` group for ALSA access
+# — the default `pi` user already is).
+User=pi
+WorkingDirectory=/home/pi/victim-simulator
+Environment=PYTHONPATH=/home/pi/victim-simulator/src
+ExecStart=/home/pi/victim-simulator/.venv/bin/python -m victimsim.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

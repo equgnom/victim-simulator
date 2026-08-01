@@ -70,11 +70,18 @@ class KnockConfig:
 
 
 @dataclass
+class WebConfig:
+    host: str = "0.0.0.0"  # 0.0.0.0 = reachable from other devices on the WLAN
+    port: int = 8080
+
+
+@dataclass
 class Config:
     audio: AudioConfig
     trigger: TriggerConfig
     behavior: BehaviorConfig
     knock: KnockConfig
+    web: WebConfig
     language: str = "en"
     volume: float = 0.9
 
@@ -102,6 +109,7 @@ class Config:
             trigger=TriggerConfig(**raw.get("trigger", {})),
             behavior=behavior,
             knock=KnockConfig(**raw.get("knock", {})),
+            web=WebConfig(**raw.get("web", {})),
             language=raw.get("language", "en"),
             volume=raw.get("volume", 0.9),
         )
