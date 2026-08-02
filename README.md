@@ -57,12 +57,33 @@ IP, on startup). The dashboard shows:
   keyword match, spontaneous call, or manual trigger), cooldown-ignored
   hits, and system events (listener ready, mode/language changes)
 - **Controls**: switch language (en/de) or behavior mode
-  (responsive/distress/weak) live — no restart needed — adjust volume, and
-  a "Trigger now" button to fire a test response on demand
+  (responsive/distress/weak) live — no restart needed — adjust voice and
+  knock volume independently, toggle "Knocking mode" (see below), and a
+  "Trigger now" button to fire a test response on demand
 
 Switching language reloads the Vosk model and restarts the mic stream in
-the background (briefly shows "not ready" while it happens); switching mode
-or volume takes effect on the very next response.
+the background (briefly shows "not ready" while it happens); switching
+mode, volume, or knocking mode takes effect on the very next response.
+
+### Knocking mode
+
+`knock.loop_enabled` in `config.yaml` (or the "Knocking mode" checkbox on
+the dashboard) makes the knock clip repeat — `knock.loop_count` times, with
+`knock.loop_gap_seconds` of silence between repeats — instead of a single
+knock. Turning it on is a deliberate action: it also guarantees a knock on
+every response for as long as it's enabled, bypassing `knock.probability`
+(and the per-mode `knock_probability` in `behavior.profiles`) — the point
+is a reliable, obvious continuous-knocking demo/test, not another random
+chance. Turn it back off to return to normal probabilistic single knocks.
+
+### Independent voice/knock volume
+
+Voice (shout/cry/moan) and knock volume are separate: `volume.voice` and
+`volume.knock` in `config.yaml`, or the two sliders on the dashboard. Both
+are further scaled by the active behavior profile's `volume_multiplier`
+(e.g. `weak` mode quiets both proportionally) but are otherwise independent
+— handy for balancing a loud transducer against a quieter speaker, or vice
+versa, without one affecting the other.
 
 No authentication — this is meant for a trusted local WLAN during a
 training exercise, not the open internet. If you need to lock it down
@@ -111,22 +132,31 @@ just answered to). Tune the numbers per mode under `behavior.profiles` in
 
 ## Status as of today
 
-Built and smoke-tested on this dev laptop (not the Pi yet):
-- Project scaffolded, Python deps installed in `.venv`
-- Placeholder audio (synthesized tones, not real recordings) in `assets/sounds/`
-- Vosk small English *and* German models downloaded to `assets/models/`
-- Web dashboard live-tested end to end: ran `python -m victimsim.main`,
-  hit it with real HTTP requests and a real browser — status/log endpoints,
-  mode/language/volume changes, and the "Trigger now" button all confirmed
-  working, including a `distress`-mode spontaneous call firing on its own
-  mid-session
+- Deployed and running on the real Pi 4B (`rvsp4`): HiFiBerry DAC+ and
+  ReSpeaker Lite both confirmed working over ALSA (`aplay -l` / `arecord -l`)
+  — the ReSpeaker needed its USB-audio firmware flashed via `dfu-util`
+  first (see the "ReSpeaker Lite" step under Deploying below), after which
+  it shows up as a normal 2-channel capture device. `config.yaml`'s
+  `audio.input_device` / `output_device` are set to match.
+- Web dashboard live-tested end to end on both the dev laptop and the Pi:
+  real HTTP requests and a real browser — status/log endpoints,
+  mode/language/volume changes, independent voice/knock volume, "Knocking
+  mode" (looped knock, confirmed audibly longer than a single knock), and
+  the "Trigger now" button all confirmed working, including a
+  `distress`-mode spontaneous call firing on its own mid-session
 - `scripts/smoke_test.py` and `pytest` (`tests/`) both pass — clip
-  loading/mixing, device listing, both languages/Vosk models, `Responder`
-  in all three behavior modes, `SpontaneousLoop` start/fire/stop, and the
-  Flask dashboard's routes + input validation
-- **Not yet tested on real hardware**: the ReSpeaker Lite mic array and
-  HiFiBerry output, and a live "say hello, hear it respond" session over
-  actual WLAN from a second device — needs the Pi.
+  loading/mixing, `loop_clip`, device listing, both languages/Vosk models,
+  `Responder` in all three behavior modes (with independent volumes and
+  knocking mode), `SpontaneousLoop` start/fire/stop, and the Flask
+  dashboard's routes + input validation
+- Real recordings now in `assets/sounds/` (multiple takes per category:
+  `shout01-03.wav`, `cry01.wav`, `moan01.wav`, `knock01-03.wav`), replacing
+  the synthesized placeholders — `SoundBank` picks randomly within each
+  category, knock included, so more takes can be dropped in any time
+- **Not yet tested**: a live "say hello, hear it respond" session over
+  actual WLAN from a second device with a person speaking near the
+  ReSpeaker (dashboard + manual trigger are confirmed; the full mic ->
+  keyword-match -> speaker loop on hardware isn't yet).
 
 ## Quickstart (dev laptop or Pi — same steps)
 
@@ -184,11 +214,23 @@ audio if instructed (`dtparam=audio=off`), then reboot and confirm with
 
 ### 3. ReSpeaker Lite
 
-It's a USB device, should enumerate automatically — plug it in and confirm
-with `arecord -l`. It may expose 1 or 2 capture channels depending on
-firmware mode; if it's 2, you'll set `audio.mic_channels: 2` in
-`config.yaml` in step 5 (the listener averages multi-channel input down to
-mono before feeding the recognizer).
+It's a USB device — plug it in and check `arecord -l`. **If it doesn't show
+up there** (but `lsusb`/`dmesg` shows it enumerating with
+`idVendor=2886, idProduct=0019, Product: ReSpeaker Lite`), it likely shipped
+with I2S-mode firmware instead of USB-audio-mode firmware, and needs
+reflashing:
+
+```bash
+sudo apt-get install -y dfu-util
+sudo dfu-util -l   # confirm it shows 2886:0019 DFU interfaces
+wget https://raw.githubusercontent.com/respeaker/ReSpeaker_Lite/master/xmos_firmwares/respeaker_lite_usb_dfu_firmware_v2.0.7.bin
+sudo dfu-util -R -e -a 1 -D respeaker_lite_usb_dfu_firmware_v2.0.7.bin
+```
+
+Unplug/replug (or reboot) after flashing, then `arecord -l` should show it
+as a standard USB Audio Class 2.0 card (e.g. `card N: Lite [ReSpeaker Lite]`).
+It exposes 2 raw capture channels (`audio.mic_channels: 2` in `config.yaml`
+— the listener averages them down to mono before feeding the recognizer).
 
 ### 4. Knocking transducer
 
@@ -262,12 +304,16 @@ live mic conversation or a running server.
 
 ## Replacing placeholder sounds
 
+`assets/sounds/` now has real recordings, not the synthesized placeholders
+(shout/cry/moan/knock — multiple takes each). Add more takes any time by
+dropping `.wav` files into `assets/sounds/<shout|cry|moan|knock>/` — any
+filename works, `SoundBank` picks randomly within each folder (knock
+included) and avoids repeating the same clip twice in a row.
+
+For a fresh checkout with no recordings yet,
 `scripts/generate_placeholder_sounds.py` synthesizes rough stand-in tones
 (siren-like "shout", wavering "cry", low "moan", triple-thump "knock") just
-so the pipeline has something to play. Swap them for real recordings by
-dropping `.wav` files into `assets/sounds/<shout|cry|moan|knock>/` — any
-filename works, `SoundBank` picks randomly within each folder and avoids
-repeating the same clip twice in a row.
+so the pipeline has something to play while you're setting up.
 
 ## Known limitations / next steps
 
@@ -280,8 +326,9 @@ repeating the same clip twice in a row.
 - Only English and German models are wired up; add more by extending
   `MODEL_NAMES` in `src/victimsim/config.py`, the `case` in
   `scripts/download_vosk_model.sh`, and a `trigger.keywords.<lang>` list.
-- Placeholder audio is synthesized, not recorded — plan a real
-  voice-actor/foley session before using this for actual training exercises.
+- Real recordings only cover one or a few takes per category so far — more
+  variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
+  would help against repetition during longer training sessions.
 - Dashboard has no authentication and uses Flask's built-in dev server —
   fine for a trusted training-exercise WLAN, not for exposing beyond that.
 - Dashboard log is in-memory only (last 300 events, process lifetime) —

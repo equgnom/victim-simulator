@@ -57,13 +57,7 @@ def test_pick_single_clip_category_repeats(sounds_dir: Path):
         assert bank.pick("cry") == only
 
 
-def test_knock_clip_found(sounds_dir: Path):
+def test_pick_knock_returns_clip_from_knock_folder(sounds_dir: Path):
     bank = SoundBank(sounds_dir=sounds_dir)
-    path = bank.knock_clip("knock1.wav")
+    path = bank.pick("knock")
     assert path == sounds_dir / "knock" / "knock1.wav"
-
-
-def test_knock_clip_missing_raises(sounds_dir: Path):
-    bank = SoundBank(sounds_dir=sounds_dir)
-    with pytest.raises(FileNotFoundError):
-        bank.knock_clip("nope.wav")

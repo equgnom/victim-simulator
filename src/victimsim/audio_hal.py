@@ -52,24 +52,39 @@ def load_clip(path, target_sr: int) -> np.ndarray:
     return data
 
 
+def loop_clip(clip: np.ndarray, count: int, gap_seconds: float, samplerate: int) -> np.ndarray:
+    """Repeats `clip` `count` times back-to-back, with a silent gap between
+    repeats, for "knocking mode" (continuous knocking instead of one knock)."""
+    if count <= 1:
+        return clip
+    gap = np.zeros(int(gap_seconds * samplerate), dtype="float32")
+    parts = [clip]
+    for _ in range(count - 1):
+        parts.append(gap)
+        parts.append(clip)
+    return np.concatenate(parts)
+
+
 def mix_to_stereo(
     voice: np.ndarray | None,
     knock: np.ndarray | None,
     voice_channel: str,
     knock_channel: str,
-    volume: float,
+    voice_volume: float,
+    knock_volume: float,
 ) -> np.ndarray:
-    """Build a stereo buffer with `voice` on voice_channel and `knock` on
-    knock_channel, mixed if both land on the same channel."""
+    """Build a stereo buffer with `voice` on voice_channel (at voice_volume)
+    and `knock` on knock_channel (at knock_volume, independent of voice_volume),
+    mixed if both land on the same channel."""
     length = max(len(voice) if voice is not None else 0, len(knock) if knock is not None else 0)
     stereo = np.zeros((length, 2), dtype="float32")
 
     if voice is not None:
         ch = CHANNEL_INDEX[voice_channel]
-        stereo[: len(voice), ch] += voice * volume
+        stereo[: len(voice), ch] += voice * voice_volume
     if knock is not None:
         ch = CHANNEL_INDEX[knock_channel]
-        stereo[: len(knock), ch] += knock * volume
+        stereo[: len(knock), ch] += knock * knock_volume
 
     np.clip(stereo, -1.0, 1.0, out=stereo)
     return stereo

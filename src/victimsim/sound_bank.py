@@ -24,15 +24,11 @@ class SoundBank:
         return clips
 
     def pick(self, category: str) -> Path:
+        """Random clip from `category` (e.g. "shout", "cry", "moan", "knock"),
+        avoiding an immediate repeat of the last pick in that category."""
         clips = self.clips_in(category)
         if len(clips) > 1 and category in self._last_pick:
             clips = [c for c in clips if c != self._last_pick[category]]
         choice = random.choice(clips)
         self._last_pick[category] = choice
         return choice
-
-    def knock_clip(self, filename: str) -> Path:
-        path = self.sounds_dir / "knock" / filename
-        if not path.exists():
-            raise FileNotFoundError(f"Knock clip not found: {path}")
-        return path

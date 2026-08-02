@@ -32,6 +32,7 @@
     border: 1px solid #444; background: #222; color: #eee;
   }
   input[type=range] { padding: 0; width: 140px; }
+  input[type=checkbox] { width: 1.2rem; height: 1.2rem; align-self: flex-start; accent-color: #4caf50; }
   button { cursor: pointer; align-self: flex-end; }
   button:hover { background: #333; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -62,6 +63,7 @@
     <div class="card"><div class="label">Last response</div><div class="value" id="s-last-response">-</div></div>
     <div class="card"><div class="label">Counts</div><div class="value" id="s-counts">-</div></div>
     <div class="card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
+    <div class="card"><div class="label">Knocking mode</div><div class="value" id="s-knock-loop">-</div></div>
   </div>
 
   <div class="controls">
@@ -81,8 +83,16 @@
       </select>
     </div>
     <div class="field">
-      <label for="volume">Volume</label>
-      <input type="range" id="volume" min="0" max="1" step="0.05">
+      <label for="voice-volume">Voice volume</label>
+      <input type="range" id="voice-volume" min="0" max="1" step="0.05">
+    </div>
+    <div class="field">
+      <label for="knock-volume">Knock volume</label>
+      <input type="range" id="knock-volume" min="0" max="1" step="0.05">
+    </div>
+    <div class="field">
+      <label for="knock-loop">Knocking mode (loop)</label>
+      <input type="checkbox" id="knock-loop">
     </div>
     <button id="trigger">Trigger now</button>
     <span id="error"></span>
@@ -114,11 +124,14 @@ async function pollStatus() {
       ? `${s.last_response.category}${s.last_response.knocked ? ' + knock' : ''} (${fmtTs(s.last_response.ts)})` : 'none yet';
     document.getElementById('s-counts').textContent = `${s.heard_count} heard / ${s.response_count} responses`;
     document.getElementById('s-temp').textContent = s.cpu_temp_c != null ? s.cpu_temp_c + ' °C' : 'n/a';
+    document.getElementById('s-knock-loop').textContent = s.knock_loop_enabled ? 'on (looping)' : 'off';
 
     const active = document.activeElement && document.activeElement.id;
     if (active !== 'language') document.getElementById('language').value = s.language;
     if (active !== 'mode') document.getElementById('mode').value = s.mode;
-    if (active !== 'volume') document.getElementById('volume').value = s.volume;
+    if (active !== 'voice-volume') document.getElementById('voice-volume').value = s.voice_volume;
+    if (active !== 'knock-volume') document.getElementById('knock-volume').value = s.knock_volume;
+    if (active !== 'knock-loop') document.getElementById('knock-loop').checked = s.knock_loop_enabled;
   } catch (e) {
     // dashboard server briefly unreachable (e.g. mid-restart) — ignore, retry next tick
   }
@@ -161,7 +174,9 @@ async function postJson(url, body) {
 
 document.getElementById('language').addEventListener('change', e => postJson('/api/language', { language: e.target.value }));
 document.getElementById('mode').addEventListener('change', e => postJson('/api/mode', { mode: e.target.value }));
-document.getElementById('volume').addEventListener('change', e => postJson('/api/volume', { volume: parseFloat(e.target.value) }));
+document.getElementById('voice-volume').addEventListener('change', e => postJson('/api/volume', { voice: parseFloat(e.target.value) }));
+document.getElementById('knock-volume').addEventListener('change', e => postJson('/api/volume', { knock: parseFloat(e.target.value) }));
+document.getElementById('knock-loop').addEventListener('change', e => postJson('/api/knock-loop', { enabled: e.target.checked }));
 document.getElementById('trigger').addEventListener('click', () => postJson('/api/trigger', {}));
 
 pollStatus();

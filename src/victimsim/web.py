@@ -71,15 +71,45 @@ def create_app(state: SharedState) -> Flask:
 
     @app.post("/api/volume")
     def set_volume():
+        """Body: {"voice": 0.0-1.0} and/or {"knock": 0.0-1.0} — either or
+        both, so the two sliders can each POST independently."""
         data = request.get_json(silent=True) or {}
-        try:
-            volume = float(data.get("volume"))
-        except (TypeError, ValueError):
-            return jsonify({"error": "volume must be a number between 0 and 1"}), 400
-        volume = max(0.0, min(1.0, volume))
+        if "voice" not in data and "knock" not in data:
+            return jsonify({"error": "provide 'voice' and/or 'knock'"}), 400
+
         with state.lock:
-            state.config.volume = volume
-        state.add_log("system", f"volume set to {volume:.2f} via web dashboard")
+            if "voice" in data:
+                try:
+                    state.config.volume.voice = max(0.0, min(1.0, float(data["voice"])))
+                except (TypeError, ValueError):
+                    return jsonify({"error": "'voice' must be a number between 0 and 1"}), 400
+            if "knock" in data:
+                try:
+                    state.config.volume.knock = max(0.0, min(1.0, float(data["knock"])))
+                except (TypeError, ValueError):
+                    return jsonify({"error": "'knock' must be a number between 0 and 1"}), 400
+
+        state.add_log(
+            "system",
+            f"volume set to voice={state.config.volume.voice:.2f} "
+            f"knock={state.config.volume.knock:.2f} via web dashboard",
+        )
+        return jsonify(state.status())
+
+    @app.post("/api/knock-loop")
+    def set_knock_loop():
+        """Body: {"enabled": true/false} — "knocking mode": loop the knock
+        clip and guarantee a knock on every response."""
+        data = request.get_json(silent=True) or {}
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            return jsonify({"error": "'enabled' must be true or false"}), 400
+        with state.lock:
+            state.config.knock.loop_enabled = enabled
+        state.add_log(
+            "system",
+            f"knocking mode {'enabled' if enabled else 'disabled'} via web dashboard",
+        )
         return jsonify(state.status())
 
     @app.post("/api/trigger")

@@ -6,12 +6,14 @@ mic conversation (useful in a headless sandbox / CI). Run the real thing with
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
+import soundfile as sf
 
 from victimsim import audio_hal
 from victimsim.config import Config, MODELS_DIR, MODEL_NAMES, SpontaneousProfile
@@ -31,31 +33,53 @@ def check(label, fn):
         raise
 
 
+def make_fast_bank(tmp_dir: Path, samplerate: int) -> SoundBank:
+    """A SoundBank over tiny (0.05s) synthetic clips, so checks that only
+    care about playback *mechanics* (not content) stay fast regardless of
+    how long the real recordings in assets/sounds/ grow to be."""
+    short = np.zeros(int(0.05 * samplerate), dtype="float32")
+    for category in ("shout", "cry", "moan", "knock"):
+        cat_dir = tmp_dir / category
+        cat_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(str(cat_dir / f"{category}.wav"), short, samplerate)
+    return SoundBank(sounds_dir=tmp_dir)
+
+
 def main():
     config = Config.load()
     check("config loads", lambda: None)
 
-    bank = SoundBank()
+    real_bank = SoundBank()
 
     def _load_all_clips():
-        for cat in config.trigger.response_categories:
-            clip = bank.pick(cat)
+        for cat in [*config.trigger.response_categories, "knock"]:
+            clip = real_bank.pick(cat)
             data = audio_hal.load_clip(clip, config.audio.playback_sample_rate)
             assert len(data) > 0, f"{clip} loaded empty"
-        knock = audio_hal.load_clip(
-            bank.knock_clip(config.knock.clip), config.audio.playback_sample_rate
-        )
-        assert len(knock) > 0
 
-    check("load all placeholder clips", _load_all_clips)
+    check("load all real sound clips (shout/cry/moan/knock)", _load_all_clips)
+
+    # From here on, checks only care about playback mechanics, not content —
+    # use tiny synthetic clips so total runtime doesn't grow with however
+    # long the real recordings in assets/sounds/ get over time.
+    bank = make_fast_bank(Path(tempfile.mkdtemp()), config.audio.playback_sample_rate)
 
     def _mix():
         voice = np.zeros(1000, dtype="float32")
         knock = np.zeros(800, dtype="float32")
-        stereo = audio_hal.mix_to_stereo(voice, knock, "left", "right", 0.9)
+        stereo = audio_hal.mix_to_stereo(voice, knock, "left", "right", 0.9, 0.3)
         assert stereo.shape == (1000, 2)
 
-    check("mix_to_stereo shapes", _mix)
+    check("mix_to_stereo shapes (independent voice/knock volume)", _mix)
+
+    def _loop_clip():
+        clip = np.ones(100, dtype="float32")
+        looped = audio_hal.loop_clip(clip, count=3, gap_seconds=0.1, samplerate=1000)
+        # 3 repeats of 100 samples + 2 gaps of 100 samples (0.1s @ 1000Hz) = 500
+        assert len(looped) == 500, f"expected 500 samples, got {len(looped)}"
+        assert audio_hal.loop_clip(clip, count=1, gap_seconds=0.1, samplerate=1000) is clip
+
+    check("loop_clip repeats with gaps", _loop_clip)
 
     def _devices():
         devices = audio_hal.list_devices()
@@ -92,13 +116,42 @@ def main():
             responder = Responder(config, bank, None)
             assert responder.ready()
             responder.respond(f"smoke test ({mode})")
-            categories, knock_prob, volume = responder._strength_params()
+            categories, knock_prob, voice_vol, knock_vol = responder._strength_params()
             assert categories
             assert 0.0 <= knock_prob <= 1.0
-            assert volume > 0
+            assert voice_vol > 0
+            assert knock_vol > 0
         config.behavior.mode = "responsive"
 
     check("responder.respond() works in responsive/distress/weak modes", _responder_per_mode)
+
+    def _knocking_mode_loops_and_guarantees_knock():
+        config.behavior.mode = "responsive"
+        config.knock.loop_enabled = True
+        config.knock.probability = 0.0  # would normally never knock — loop mode should override this
+        config.knock.loop_count = 3
+        config.knock.loop_gap_seconds = 0.05
+        state = SharedState(config)
+        responder = Responder(config, bank, None, state=state)
+        state.responder = responder
+        responder.respond("smoke test (knocking mode)")
+        assert state.last_response["knocked"], "knocking mode should guarantee a knock despite probability=0"
+        config.knock.loop_enabled = False
+        config.knock.probability = 0.5
+
+    check("knocking mode loops the knock clip and bypasses probability", _knocking_mode_loops_and_guarantees_knock)
+
+    def _independent_volumes():
+        config.volume.voice = 0.2
+        config.volume.knock = 0.8
+        responder = Responder(config, bank, None)
+        _, _, voice_vol, knock_vol = responder._strength_params()
+        assert abs(voice_vol - 0.2) < 1e-6
+        assert abs(knock_vol - 0.8) < 1e-6
+        config.volume.voice = 0.9
+        config.volume.knock = 0.9
+
+    check("voice and knock volume are independent", _independent_volumes)
 
     def _spontaneous_loop_runs():
         config.behavior.mode = "distress"
@@ -117,9 +170,9 @@ def main():
         loop.start()
         time.sleep(0.5)
         loop.stop()
-        # stop() only takes effect between calls, so if it fired mid-playback
-        # (clips run up to ~2.5s), give it enough headroom to finish + exit.
-        loop.join(timeout=5)
+        # stop() only takes effect between calls, so give it a little
+        # headroom past a single fast-bank clip's playback to finish + exit.
+        loop.join(timeout=2)
         assert not loop.is_alive(), "SpontaneousLoop thread did not stop"
         assert state.response_count > 0, "SpontaneousLoop never triggered a response"
         config.behavior.mode = "responsive"
@@ -150,8 +203,17 @@ def main():
         assert state.language == "de"
         assert state.reload_event.is_set(), "language switch should signal the audio loop to reload"
 
-        assert client.post("/api/volume", json={"volume": 2.0}).status_code == 200
-        assert state.config.volume == 1.0, "volume should be clamped to [0, 1]"
+        assert client.post("/api/volume", json={}).status_code == 400
+        assert client.post("/api/volume", json={"voice": 2.0}).status_code == 200
+        assert state.config.volume.voice == 1.0, "voice volume should be clamped to [0, 1]"
+        assert client.post("/api/volume", json={"knock": 0.3}).status_code == 200
+        assert state.config.volume.knock == 0.3
+        assert state.config.volume.voice == 1.0, "knock-only update shouldn't touch voice volume"
+
+        assert client.post("/api/knock-loop", json={"enabled": "yes"}).status_code == 400
+        assert client.post("/api/knock-loop", json={"enabled": True}).status_code == 200
+        assert state.config.knock.loop_enabled is True
+        client.post("/api/knock-loop", json={"enabled": False})
 
         resp = client.post("/api/trigger", json={})
         assert resp.status_code == 200

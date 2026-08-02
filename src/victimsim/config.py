@@ -66,7 +66,18 @@ class BehaviorConfig:
 class KnockConfig:
     enabled: bool = True
     probability: float = 0.5
-    clip: str = "knock1.wav"
+    # "Knocking mode": loop the knock clip instead of playing it once. While
+    # enabled, a knock is guaranteed on every response (probability above is
+    # bypassed) — turning this on is a deliberate "make it knock" action.
+    loop_enabled: bool = False
+    loop_count: int = 4
+    loop_gap_seconds: float = 0.4
+
+
+@dataclass
+class VolumeConfig:
+    voice: float = 0.9
+    knock: float = 0.9
 
 
 @dataclass
@@ -82,8 +93,8 @@ class Config:
     behavior: BehaviorConfig
     knock: KnockConfig
     web: WebConfig
+    volume: VolumeConfig
     language: str = "en"
-    volume: float = 0.9
 
     @property
     def model_name(self) -> str:
@@ -104,12 +115,20 @@ class Config:
         }
         behavior = BehaviorConfig(mode=behavior_raw.get("mode", "responsive"), profiles=profiles)
 
+        volume_raw = raw.get("volume", 0.9)
+        if isinstance(volume_raw, dict):
+            volume = VolumeConfig(**volume_raw)
+        else:
+            # Back-compat with the old flat `volume: 0.9` format: same level
+            # applied to both voice and knock.
+            volume = VolumeConfig(voice=float(volume_raw), knock=float(volume_raw))
+
         return cls(
             audio=AudioConfig(**raw.get("audio", {})),
             trigger=TriggerConfig(**raw.get("trigger", {})),
             behavior=behavior,
             knock=KnockConfig(**raw.get("knock", {})),
             web=WebConfig(**raw.get("web", {})),
+            volume=volume,
             language=raw.get("language", "en"),
-            volume=raw.get("volume", 0.9),
         )

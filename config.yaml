@@ -1,16 +1,16 @@
 # Responsive Victim Simulator — configuration
 #
-# On the dev laptop, leave the device fields as null (uses system default
-# mic/speakers). On the Pi, set them to substrings that match `sd.query_devices()`
-# output for the ReSpeaker Lite (input) and HiFiBerry (output) — run
-# `python -m victimsim.main --list-devices` to see exact names.
+# audio.input_device / output_device below are set for the deployed Pi
+# (device substrings from `python -m victimsim.main --list-devices`, run on
+# the Pi itself). On a dev laptop without this hardware, set both to null
+# to fall back to the system default mic/speakers.
 
 language: de   # en | de — picks the keyword list below and which Vosk model to load
 
 audio:
-  input_device: null       # e.g. "ReSpeaker" on the Pi
-  output_device: null      # e.g. "snd_rpi_hifiberry" on the Pi
-  mic_channels: 1          # set to 2 on the Pi if ReSpeaker Lite exposes a stereo capture device
+  input_device: "ReSpeaker"    # matches "ReSpeaker Lite: USB Audio (hw:4,0)" on the Pi
+  output_device: "HiFiBerry"   # matches "snd_rpi_hifiberry_dacplus: ... (hw:3,0)" on the Pi
+  mic_channels: 2          # ReSpeaker Lite's USB-audio firmware exposes 2 raw mic channels
   mic_sample_rate: 16000   # Vosk wants 16kHz mono
   playback_sample_rate: 44100
   voice_channel: left      # stereo output channel carrying victim voice
@@ -66,7 +66,14 @@ behavior:
 knock:
   enabled: true
   probability: 0.5         # base knock chance for "responsive" mode
-  clip: "knock1.wav"
+  # Randomly picked from assets/sounds/knock/*.wav, same as shout/cry/moan.
+  # "Knocking mode": when true, the knock clip repeats (loop_count times,
+  # loop_gap_seconds of silence between repeats) instead of playing once,
+  # and is guaranteed on every response (probability above is bypassed
+  # while this is on). Toggle live from the dashboard too.
+  loop_enabled: false
+  loop_count: 4
+  loop_gap_seconds: 0.4
 
 # Web dashboard: status/log monitoring + live mode/language/volume control,
 # reachable from any device on the same WLAN as the Pi.
@@ -74,4 +81,9 @@ web:
   host: 0.0.0.0   # 0.0.0.0 = reachable over WLAN; use 127.0.0.1 to restrict to the Pi itself
   port: 8080
 
-volume: 0.9
+# Voice (shout/cry/moan) and knock volume are independent — each 0.0-1.0,
+# adjustable live from the dashboard too. Both are further scaled by the
+# active behavior profile's volume_multiplier (see `behavior` above).
+volume:
+  voice: 0.9
+  knock: 0.9

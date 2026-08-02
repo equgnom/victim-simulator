@@ -83,7 +83,9 @@ class SharedState:
             return {
                 "language": self.language,
                 "mode": self.config.behavior.mode,
-                "volume": self.config.volume,
+                "voice_volume": self.config.volume.voice,
+                "knock_volume": self.config.volume.knock,
+                "knock_loop_enabled": self.config.knock.loop_enabled,
                 "uptime_seconds": round(time.time() - self.started_at, 1),
                 "listener_ready": self.listener_ready,
                 "input_device": self.input_device,
