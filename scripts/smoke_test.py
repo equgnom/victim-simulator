@@ -49,6 +49,14 @@ def main():
     config = Config.load()
     check("config loads", lambda: None)
 
+    def _ap_mode_config():
+        assert config.network.ap_mode.enabled is False
+        assert config.network.ap_mode.ssid
+        assert len(config.network.ap_mode.password) >= 8, "WPA2 requires an 8+ char password"
+        assert config.network.ap_mode.interface
+
+    check("network.ap_mode config parses with sane defaults", _ap_mode_config)
+
     real_bank = SoundBank()
 
     def _load_all_clips():
@@ -190,7 +198,9 @@ def main():
         client = app.test_client()
 
         assert client.get("/").status_code == 200
-        assert client.get("/api/status").status_code == 200
+        status_resp = client.get("/api/status")
+        assert status_resp.status_code == 200
+        assert status_resp.get_json()["ap_mode_enabled"] is False
         assert client.get("/api/log").status_code == 200
 
         assert client.post("/api/mode", json={"mode": "bogus"}).status_code == 400

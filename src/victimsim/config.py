@@ -87,6 +87,24 @@ class WebConfig:
 
 
 @dataclass
+class ApModeConfig:
+    """Declares the desired standalone-WiFi-hotspot state. Applying it is a
+    separate, explicit step (scripts/setup_wifi_ap.sh) — this config is just
+    the single source of truth for SSID/password so the app and the setup
+    script never disagree."""
+
+    enabled: bool = False
+    ssid: str = "VictimSim"
+    password: str = "rescue1234"
+    interface: str = "wlan0"
+
+
+@dataclass
+class NetworkConfig:
+    ap_mode: ApModeConfig = field(default_factory=ApModeConfig)
+
+
+@dataclass
 class Config:
     audio: AudioConfig
     trigger: TriggerConfig
@@ -94,6 +112,7 @@ class Config:
     knock: KnockConfig
     web: WebConfig
     volume: VolumeConfig
+    network: NetworkConfig
     language: str = "en"
 
     @property
@@ -123,6 +142,9 @@ class Config:
             # applied to both voice and knock.
             volume = VolumeConfig(voice=float(volume_raw), knock=float(volume_raw))
 
+        network_raw = raw.get("network", {})
+        network = NetworkConfig(ap_mode=ApModeConfig(**network_raw.get("ap_mode", {})))
+
         return cls(
             audio=AudioConfig(**raw.get("audio", {})),
             trigger=TriggerConfig(**raw.get("trigger", {})),
@@ -130,5 +152,6 @@ class Config:
             knock=KnockConfig(**raw.get("knock", {})),
             web=WebConfig(**raw.get("web", {})),
             volume=volume,
+            network=network,
             language=raw.get("language", "en"),
         )

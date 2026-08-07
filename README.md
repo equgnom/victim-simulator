@@ -153,6 +153,12 @@ just answered to). Tune the numbers per mode under `behavior.profiles` in
   `shout01-03.wav`, `cry01.wav`, `moan01.wav`, `knock01-03.wav`), replacing
   the synthesized placeholders — `SoundBank` picks randomly within each
   category, knock included, so more takes can be dropped in any time
+- Standalone WLAN AP mode built (`network.ap_mode` config +
+  `scripts/setup_wifi_ap.sh`, NetworkManager hotspot via `nmcli`) and
+  smoke-tested for config parsing/dashboard status only — **not yet run for
+  real on the Pi** (it needs `nmcli` and touches live network state, which
+  isn't something to exercise from here; try it there and let me know how
+  it goes, especially the SSH-over-WiFi disconnect behavior).
 - **Not yet tested**: a live "say hello, hear it respond" session over
   actual WLAN from a second device with a person speaking near the
   ReSpeaker (dashboard + manual trigger are confirmed; the full mic ->
@@ -290,6 +296,53 @@ config changes after this, edit `config.yaml` and
 `sudo systemctl restart victimsim` (or just use the dashboard for anything
 that's live-adjustable: language, mode, volume).
 
+## Standalone WLAN (Pi as its own WiFi hotspot)
+
+For field use with no external router available, the Pi can broadcast its
+own WiFi network so a phone connects directly to reach the dashboard.
+
+**Before you run this**: a Pi 4B has a single WiFi radio. Enabling the
+hotspot disconnects any existing WiFi client connection on that radio —
+**including an SSH session over WiFi**. Do this over Ethernet, a direct
+console (keyboard/monitor), or be ready to immediately reconnect by joining
+the new hotspot network yourself. It also sets the hotspot to autoconnect,
+so it comes up in AP mode on every future boot too, not just this once.
+
+1. Set your SSID/password under `network.ap_mode` in `config.yaml` (change
+   the default password — it's committed to the repo as a placeholder):
+   ```yaml
+   network:
+     ap_mode:
+       enabled: true
+       ssid: "VictimSim"
+       password: "your-own-password-here"   # 8+ chars, WPA2
+       interface: wlan0
+   ```
+2. Apply it — this is a separate, explicit step, not something the app does
+   on its own:
+   ```bash
+   bash scripts/setup_wifi_ap.sh
+   ```
+   It reads the config above, warns you about the disconnect, asks for
+   confirmation, then sets up a NetworkManager hotspot connection
+   (`nmcli`) and brings it up.
+3. On your phone: connect to the `VictimSim` WiFi network, then browse to
+   the address the script prints (NetworkManager's shared-mode gateway,
+   typically `http://10.42.0.1:8080`).
+
+To revert to normal WiFi client mode (e.g. to get the Pi back online at
+home for maintenance):
+```bash
+bash scripts/setup_wifi_ap.sh disable
+```
+then either reboot or `nmcli connection up <your-wifi-profile-name>` (list
+profiles with `nmcli connection show`).
+
+The dashboard's "Network" status card reflects `config.yaml`'s configured
+intent (whether AP mode is turned on and its SSID) — it doesn't actively
+verify the hotspot is live, since that's a one-time infrastructure step
+independent of whether the app happens to be running.
+
 ## Running tests
 
 ```bash
@@ -333,3 +386,6 @@ so the pipeline has something to play while you're setting up.
   fine for a trusted training-exercise WLAN, not for exposing beyond that.
 - Dashboard log is in-memory only (last 300 events, process lifetime) —
   add persistence if you need to review a session after the Pi restarts.
+- AP mode's default `config.yaml` password is a committed placeholder —
+  change it before deploying, and note it's stored in plaintext in the
+  repo/config file like the other settings (no secrets management here).

@@ -107,6 +107,12 @@ def main() -> None:
         f"Responsive Victim Simulator running (language={config.language}, "
         f"mode={config.behavior.mode})."
     )
+    if config.network.ap_mode.enabled:
+        print(
+            f"network.ap_mode is enabled (ssid={config.network.ap_mode.ssid}) — "
+            f"this only takes effect once you've run "
+            f"`bash scripts/setup_wifi_ap.sh`, it isn't applied automatically."
+        )
 
     def shutdown():
         state.stop_event.set()

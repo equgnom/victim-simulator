@@ -95,4 +95,6 @@ class SharedState:
                 "heard_count": self.heard_count,
                 "response_count": self.response_count,
                 "cpu_temp_c": read_cpu_temp(),
+                "ap_mode_enabled": self.config.network.ap_mode.enabled,
+                "ap_mode_ssid": self.config.network.ap_mode.ssid,
             }

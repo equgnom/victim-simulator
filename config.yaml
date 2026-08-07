@@ -51,14 +51,14 @@ behavior:
   mode: responsive
   profiles:
     distress:
-      interval_min_seconds: 20
-      interval_max_seconds: 60
+      interval_min_seconds: 10
+      interval_max_seconds: 20
       volume_multiplier: 1.0
       response_categories: [shout, cry, moan]
       knock_probability: 0.6
     weak:
-      interval_min_seconds: 90
-      interval_max_seconds: 240
+      interval_min_seconds: 30
+      interval_max_seconds: 60
       volume_multiplier: 0.45
       response_categories: [moan, cry]
       knock_probability: 0.15
@@ -72,8 +72,8 @@ knock:
   # and is guaranteed on every response (probability above is bypassed
   # while this is on). Toggle live from the dashboard too.
   loop_enabled: false
-  loop_count: 4
-  loop_gap_seconds: 0.4
+  loop_count: 10
+  loop_gap_seconds: 0.2
 
 # Web dashboard: status/log monitoring + live mode/language/volume control,
 # reachable from any device on the same WLAN as the Pi.
@@ -87,3 +87,18 @@ web:
 volume:
   voice: 0.9
   knock: 0.9
+
+# Standalone WLAN: make the Pi broadcast its own WiFi network so a phone can
+# reach the dashboard directly, with no external router needed (e.g. in the
+# field during a training exercise). This section only declares the desired
+# SSID/password — applying it is a separate, explicit step:
+# `bash scripts/setup_wifi_ap.sh` (see README). A Pi 4B has a single WiFi
+# radio, so enabling this disconnects any existing WiFi client connection
+# (including an SSH session over WiFi) — the script warns about this and
+# asks for confirmation before doing anything.
+network:
+  ap_mode:
+    enabled: false
+    ssid: "VictimSim"
+    password: "rescue1234"   # WPA2-PSK — change this, 8+ chars required
+    interface: wlan0

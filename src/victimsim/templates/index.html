@@ -64,6 +64,7 @@
     <div class="card"><div class="label">Counts</div><div class="value" id="s-counts">-</div></div>
     <div class="card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
     <div class="card"><div class="label">Knocking mode</div><div class="value" id="s-knock-loop">-</div></div>
+    <div class="card"><div class="label">Network</div><div class="value" id="s-network">-</div></div>
   </div>
 
   <div class="controls">
@@ -125,6 +126,8 @@ async function pollStatus() {
     document.getElementById('s-counts').textContent = `${s.heard_count} heard / ${s.response_count} responses`;
     document.getElementById('s-temp').textContent = s.cpu_temp_c != null ? s.cpu_temp_c + ' °C' : 'n/a';
     document.getElementById('s-knock-loop').textContent = s.knock_loop_enabled ? 'on (looping)' : 'off';
+    document.getElementById('s-network').textContent = s.ap_mode_enabled
+      ? `AP mode ("${s.ap_mode_ssid}")` : 'client WiFi';
 
     const active = document.activeElement && document.activeElement.id;
     if (active !== 'language') document.getElementById('language').value = s.language;
