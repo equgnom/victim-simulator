@@ -15,6 +15,7 @@ MODELS_DIR = REPO_ROOT / "assets" / "models"
 MODEL_NAMES = {
     "en": "vosk-model-small-en-us-0.15",
     "de": "vosk-model-small-de-0.15",
+    "it": "vosk-model-small-it-0.22",
 }
 
 
@@ -24,6 +25,11 @@ class AudioConfig:
     output_device: str | None = None
     mic_channels: int = 1     # ReSpeaker Lite may expose 2 channels; averaged down to mono for the recognizer
     mic_sample_rate: int = 16000
+    # Audio fed to the recognizer in chunks this many samples long (at
+    # mic_sample_rate). Smaller = checks for a keyword match more often =
+    # lower detection latency, at the cost of more frequent recognizer
+    # calls. 3200 @ 16kHz = 0.2s.
+    mic_block_size: int = 3200
     playback_sample_rate: int = 44100
     voice_channel: str = "left"
     knock_channel: str = "right"
@@ -32,8 +38,14 @@ class AudioConfig:
 @dataclass
 class TriggerConfig:
     keywords: dict[str, list[str]] = field(default_factory=dict)
-    cooldown_seconds: float = 6.0
+    cooldown_seconds: float = 5.0
     response_categories: list[str] = field(default_factory=lambda: ["shout", "cry", "moan"])
+    # Subset of response_categories currently eligible to be picked — a
+    # global on/off per category, adjustable live from the dashboard
+    # (checked = included). Defaults to all of response_categories when
+    # left empty. Applies on top of whatever a behavior profile's own
+    # response_categories says (see Responder._strength_params).
+    enabled_categories: list[str] = field(default_factory=list)
 
     def keywords_for(self, language: str) -> list[str]:
         return self.keywords.get(language, self.keywords.get("en", []))
@@ -87,6 +99,15 @@ class WebConfig:
 
 
 @dataclass
+class MonitoringConfig:
+    # The Pi throttles ARM core frequency starting ~80°C and hard-limits at
+    # 85°C (official Raspberry Pi thermal behavior). Default here is a few
+    # degrees below that, so the dashboard warns before throttling actually
+    # starts, not exactly when it does.
+    cpu_temp_warning_c: float = 75.0
+
+
+@dataclass
 class ApModeConfig:
     """Declares the desired standalone-WiFi-hotspot state. Applying it is a
     separate, explicit step (scripts/setup_wifi_ap.sh) — this config is just
@@ -113,6 +134,7 @@ class Config:
     web: WebConfig
     volume: VolumeConfig
     network: NetworkConfig
+    monitoring: MonitoringConfig
     language: str = "en"
 
     @property
@@ -145,13 +167,18 @@ class Config:
         network_raw = raw.get("network", {})
         network = NetworkConfig(ap_mode=ApModeConfig(**network_raw.get("ap_mode", {})))
 
+        trigger = TriggerConfig(**raw.get("trigger", {}))
+        if not trigger.enabled_categories:
+            trigger.enabled_categories = list(trigger.response_categories)
+
         return cls(
             audio=AudioConfig(**raw.get("audio", {})),
-            trigger=TriggerConfig(**raw.get("trigger", {})),
+            trigger=trigger,
             behavior=behavior,
             knock=KnockConfig(**raw.get("knock", {})),
             web=WebConfig(**raw.get("web", {})),
             volume=volume,
             network=network,
+            monitoring=MonitoringConfig(**raw.get("monitoring", {})),
             language=raw.get("language", "en"),
         )

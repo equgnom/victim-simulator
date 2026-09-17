@@ -48,6 +48,7 @@ def audio_loop(state: SharedState, input_device, output_device) -> None:
             device=input_device,
             keywords=keywords,
             channels=state.config.audio.mic_channels,
+            block_size=state.config.audio.mic_block_size,
         )
         state.listener_ready = True
         state.add_log("system", f"listener ready (language={language})")
@@ -92,6 +93,11 @@ def main() -> None:
     state.output_device = output_device
 
     sound_bank = SoundBank()
+    preloaded = audio_hal.preload_all_clips(
+        sound_bank, [*config.trigger.response_categories, "knock"], config.audio.playback_sample_rate
+    )
+    print(f"Preloaded {preloaded} sound clips into memory (no disk I/O on the response path).")
+
     responder = Responder(config, sound_bank, output_device, state=state)
     state.responder = responder
 

@@ -5,13 +5,14 @@
 # the Pi itself). On a dev laptop without this hardware, set both to null
 # to fall back to the system default mic/speakers.
 
-language: de   # en | de — picks the keyword list below and which Vosk model to load
+language: de   # en | de | it — picks the keyword list below and which Vosk model to load
 
 audio:
   input_device: "ReSpeaker"    # matches "ReSpeaker Lite: USB Audio (hw:4,0)" on the Pi
   output_device: "HiFiBerry"   # matches "snd_rpi_hifiberry_dacplus: ... (hw:3,0)" on the Pi
   mic_channels: 2          # ReSpeaker Lite's USB-audio firmware exposes 2 raw mic channels
   mic_sample_rate: 16000   # Vosk wants 16kHz mono
+  mic_block_size: 3200     # 0.2s @ 16kHz — smaller = checks for a keyword match more often (lower latency)
   playback_sample_rate: 44100
   voice_channel: left      # stereo output channel carrying victim voice
   knock_channel: right     # stereo output channel driving the knock transducer
@@ -33,11 +34,23 @@ trigger:
       - "hört mich jemand"
       - "rettung"
       - "rettungsdienst"
-  cooldown_seconds: 6      # minimum gap between any two responses, avoids spamming
+    it:
+      - "ciao"
+      - "c'è qualcuno"
+      - "c'è nessuno"
+      - "mi senti"
+      - "soccorso"
+      - "squadra di soccorso"
+  cooldown_seconds: 5      # minimum gap between any two responses, avoids spamming — adjustable live from the dashboard
   response_categories:     # random category chosen each time, then random clip within it
     - shout
     - cry
     - moan
+  # Which of the above are currently eligible to be picked — toggle live
+  # from the dashboard's checkboxes (checked = included, unchecked =
+  # excluded from every mode's random pick). Defaults to all of
+  # response_categories if left empty/omitted.
+  enabled_categories: [shout, cry, moan]
 
 # Behavior mode:
 #   responsive - only reacts when it hears a keyword (default, current behavior)
@@ -80,6 +93,13 @@ knock:
 web:
   host: 0.0.0.0   # 0.0.0.0 = reachable over WLAN; use 127.0.0.1 to restrict to the Pi itself
   port: 8080
+
+# The Pi throttles ARM core frequency starting ~80°C and hard-limits at
+# 85°C (official Raspberry Pi thermal behavior). cpu_temp_warning_c sets
+# when the dashboard's CPU temp card switches to a warning state — a few
+# degrees below 80 by default, so you notice before throttling starts.
+monitoring:
+  cpu_temp_warning_c: 75.0
 
 # Voice (shout/cry/moan) and knock volume are independent — each 0.0-1.0,
 # adjustable live from the dashboard too. Both are further scaled by the

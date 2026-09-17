@@ -5,6 +5,7 @@
 #   bash scripts/download_vosk_model.sh        # English (default)
 #   bash scripts/download_vosk_model.sh en
 #   bash scripts/download_vosk_model.sh de      # German
+#   bash scripts/download_vosk_model.sh it      # Italian
 set -euo pipefail
 
 LANGUAGE="${1:-en}"
@@ -12,8 +13,9 @@ LANGUAGE="${1:-en}"
 case "$LANGUAGE" in
   en) MODEL_NAME="vosk-model-small-en-us-0.15" ;;
   de) MODEL_NAME="vosk-model-small-de-0.15" ;;
+  it) MODEL_NAME="vosk-model-small-it-0.22" ;;
   *)
-    echo "Unknown language '$LANGUAGE'. Supported: en, de" >&2
+    echo "Unknown language '$LANGUAGE'. Supported: en, de, it" >&2
     exit 1
     ;;
 esac

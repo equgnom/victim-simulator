@@ -37,8 +37,23 @@ def resolve_device(name_substring: str | None, kind: str) -> int | None:
     )
 
 
+_clip_cache: dict[tuple[str, int], np.ndarray] = {}
+
+
 def load_clip(path, target_sr: int) -> np.ndarray:
-    """Load a wav file as mono float32, resampled to target_sr if needed."""
+    """Load a wav file as mono float32, resampled to target_sr if needed.
+
+    Cached by (path, target_sr): decode + resample only happens once per
+    clip, so it doesn't add latency to the detection-to-playback path on
+    every response — only the first time a given clip is used. Callers
+    never mutate the returned array in place (mix_to_stereo/loop_clip both
+    build new arrays), so sharing the cached array is safe.
+    """
+    key = (str(path), target_sr)
+    cached = _clip_cache.get(key)
+    if cached is not None:
+        return cached
+
     data, sr = sf.read(str(path), dtype="float32", always_2d=False)
     if data.ndim > 1:
         data = data.mean(axis=1)
@@ -49,7 +64,23 @@ def load_clip(path, target_sr: int) -> np.ndarray:
         x_old = np.linspace(0, duration, num=len(data), endpoint=False)
         x_new = np.linspace(0, duration, num=target_len, endpoint=False)
         data = np.interp(x_new, x_old, data).astype("float32")
+
+    _clip_cache[key] = data
     return data
+
+
+def preload_all_clips(sound_bank, categories, target_sr: int) -> int:
+    """Warms the clip cache for every clip in `categories` (all voice
+    categories plus "knock"), so even the *first* response of a session
+    doesn't pay disk I/O + resample latency — that already only happens
+    once per clip thanks to load_clip's cache, this just moves it to
+    startup instead of mid-response. Returns how many clips were loaded."""
+    count = 0
+    for category in categories:
+        for clip_path in sound_bank.clips_in(category):
+            load_clip(clip_path, target_sr)
+            count += 1
+    return count
 
 
 def loop_clip(clip: np.ndarray, count: int, gap_seconds: float, samplerate: int) -> np.ndarray:
@@ -91,5 +122,5 @@ def mix_to_stereo(
 
 
 def play_blocking(stereo: np.ndarray, samplerate: int, device: int | None) -> None:
-    sd.play(stereo, samplerate=samplerate, device=device)
+    sd.play(stereo, samplerate=samplerate, device=device, latency="low")
     sd.wait()

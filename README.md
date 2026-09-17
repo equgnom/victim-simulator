@@ -96,19 +96,24 @@ Run `python -m victimsim.main --no-web` for CLI-only mode (no dashboard).
 
 ## Language
 
-Set `language: en` or `language: de` in [`config.yaml`](config.yaml). This
+Set `language: en`, `de`, or `it` in [`config.yaml`](config.yaml). This
 picks both the keyword list under `trigger.keywords` and the Vosk model
-(`assets/models/vosk-model-small-en-us-0.15` or `-de-0.15`) — or switch it
-live from the web dashboard. Download the model for whichever language(s)
-you use:
+(`assets/models/vosk-model-small-<en-us-0.15|de-0.15|it-0.22>`) — or switch
+it live from the web dashboard. Download the model for whichever
+language(s) you use:
 
 ```bash
 bash scripts/download_vosk_model.sh en
 bash scripts/download_vosk_model.sh de
+bash scripts/download_vosk_model.sh it
 ```
 
-Add more phrases by editing `trigger.keywords.en` / `trigger.keywords.de` in
-`config.yaml` (case-insensitive substring match against what Vosk hears).
+Add more phrases by editing `trigger.keywords.<en|de|it>` in `config.yaml`
+(case-insensitive substring match against what Vosk hears). Add another
+language entirely by extending `MODEL_NAMES` in
+`src/victimsim/config.py`, the `case` in `scripts/download_vosk_model.sh`,
+a `trigger.keywords.<lang>` list, and the `<option>` in the dashboard's
+language selector ([`templates/index.html`](src/victimsim/templates/index.html)).
 
 ## Behavior modes
 
@@ -130,6 +135,102 @@ strength (a weak victim sounds weak whether it called out on its own or was
 just answered to). Tune the numbers per mode under `behavior.profiles` in
 `config.yaml`.
 
+## Voice sound selection
+
+`trigger.enabled_categories` in `config.yaml`, or the "Voice sounds"
+checkboxes on the dashboard (Shout/Cry/Moan) — check a category to make it
+eligible for random selection, uncheck to exclude it from every mode's
+response entirely. Applies on top of whatever the active behavior profile
+would otherwise offer (so `weak` mode's own moan/cry-only restriction still
+holds; unchecking one of those two just narrows it further). At least one
+category must always stay enabled — the dashboard rejects trying to
+uncheck the last one, with an inline error explaining why.
+
+## Cooldown
+
+`trigger.cooldown_seconds` in `config.yaml` (default `5`), or the
+"Cooldown" slider on the dashboard — the minimum gap between any two
+responses, keyword-triggered or spontaneous, so it doesn't spam. Range
+0-300s. The slider shows a live numeric readout while dragging and posts
+the change on release, not on every pixel of drag.
+
+## CPU temperature warning
+
+The Raspberry Pi throttles its ARM core frequency starting around 80°C and
+hard-limits both ARM and GPU at 85°C (official Raspberry Pi thermal
+behavior — there's no shutdown, it just clocks down to stay under that
+ceiling). The dashboard's "CPU temp" card turns into a visible warning
+(orange border, warning text) once the temperature reaches
+`monitoring.cpu_temp_warning_c` in `config.yaml` (default `75.0`, a few
+degrees ahead of actual throttling so you notice in time). Crossing into
+or recovering out of the warning zone also gets a one-time log entry —
+it's edge-triggered, not logged on every 2-second poll.
+
+This is Pi SoC temperature only (`/sys/class/thermal/thermal_zone0/temp`)
+— the HiFiBerry board itself doesn't expose any temperature telemetry to
+Linux (checked: its ALSA mixer only has volume-type controls), so there's
+no equivalent warning possible for the amp/DAC chip itself.
+
+## Log time vs. the Pi's clock
+
+The Pi has no battery-backed RTC, and in standalone AP mode it has no
+internet for NTP either — its system clock can end up wrong, sometimes by
+hours (it just keeps whatever time it had when it lost power/network, via
+`fake-hwclock`; if that was itself never synced, it can be arbitrarily
+off). Rather than show that raw, possibly-wrong time, the dashboard
+compares the server's reported time (`server_time` in `/api/status`)
+against the viewing device's own clock on every poll, and shifts every
+displayed timestamp (log entries, last-heard/last-response) by that
+offset — so what you see matches your phone/laptop's clock, not the Pi's.
+The "Clock" status card shows the current offset (`in sync`, or e.g.
+`+3h 17m 0s (Pi clock)`), so you can tell at a glance whether — and how
+much — the Pi's clock is off, and it self-corrects live if the Pi's clock
+later gets fixed (e.g. it regains internet and NTP syncs mid-session).
+
+This only corrects what's *displayed* — it doesn't change the Pi's actual
+system clock, so anything else that reads it directly (`journalctl`
+timestamps, file mtimes) still shows the Pi's own, potentially-wrong time.
+If you want the underlying clock itself fixed, connect the Pi to the
+internet (client WiFi mode, not the AP) at least once before a session so
+NTP can sync it — `fake-hwclock` then keeps it close across reboots even
+without further internet access.
+
+## Detection-to-response latency
+
+Four changes cut the gap between a keyword being spoken and the response
+playing:
+
+1. **Partial-result matching** ([`listener.py`](src/victimsim/listener.py)) —
+   the listener now checks Vosk's streaming *partial* hypothesis on every
+   audio block, not just the finalized result after it detects
+   end-of-utterance silence. Waiting for that endpoint was the single
+   biggest source of latency (often several hundred ms to over a second);
+   reacting to the in-progress guess skips that wait entirely. Trade-off:
+   a partial hypothesis can still change before Vosk settles on it, so
+   this can occasionally trigger a beat early on text that isn't quite
+   final — acceptable here since an early/extra response just means one
+   more shout, not a wrong reading.
+2. **Smaller mic block size** (`audio.mic_block_size` in `config.yaml`,
+   default `3200` = 0.2s @ 16kHz, down from 0.5s) — audio reaches the
+   recognizer in smaller pieces, so there's less inherent delay between
+   speech happening and it being checked at all.
+3. **Clip preloading** — all sound clips are decoded and resampled into
+   memory once at startup (prints `Preloaded N sound clips...`) instead of
+   on first use. `load_clip()` is cached by (path, sample rate) regardless,
+   but preloading means even the *first* response of a session doesn't
+   pay that disk I/O + resample cost — it happens once, upfront, off the
+   response path entirely.
+4. **Low-latency audio streams** — both the mic input stream and
+   `sd.play()` now request `latency="low"` from PortAudio, shrinking its
+   default buffering.
+
+Measured on this dev laptop: preloading moves ~28ms of disk I/O +
+resample off the response path (paid once at startup instead) — likely
+more pronounced on the Pi's SD card and slower CPU. The partial-result
+change is the one that actually matters most, but it isn't independently
+measurable without a live mic and a real spoken phrase; it needs to be
+judged by ear on the actual hardware.
+
 ## Status as of today
 
 - Deployed and running on the real Pi 4B (`rvsp4`): HiFiBerry DAC+ and
@@ -149,10 +250,44 @@ just answered to). Tune the numbers per mode under `behavior.profiles` in
   `Responder` in all three behavior modes (with independent volumes and
   knocking mode), `SpontaneousLoop` start/fire/stop, and the Flask
   dashboard's routes + input validation
-- Real recordings now in `assets/sounds/` (multiple takes per category:
-  `shout01-03.wav`, `cry01.wav`, `moan01.wav`, `knock01-03.wav`), replacing
-  the synthesized placeholders — `SoundBank` picks randomly within each
+- Real recordings now in `assets/sounds/` (`free_shout.wav`,
+  `free_crying.wav`, `free_sobbing.wav`, `knock01-03.wav`), replacing the
+  synthesized placeholders — `SoundBank` picks randomly within each
   category, knock included, so more takes can be dropped in any time
+- Voice sound selection (Shout/Cry/Moan checkboxes on the dashboard,
+  `trigger.enabled_categories` in config) — smoke-tested including the
+  "reject unchecking the last one" validation, plus live-tested in a real
+  browser (found and fixed a checkbox-sync bug in the process: a checkbox
+  that keeps focus after being clicked was getting skipped by the
+  "don't overwrite what the user's actively editing" logic that sliders
+  need, so a rejected change looked stuck instead of reverting)
+- CPU temperature warning card (`monitoring.cpu_temp_warning_c`) —
+  smoke-tested (edge-triggered logging, warning boolean) and live-tested
+  in a real browser with the temperature reader monkeypatched to 82°C
+  (this dev laptop has no thermal-zone sysfs file to read for real)
+- Italian added as a third language (`vosk-model-small-it-0.22`) — model
+  downloaded and smoke-tested, plus live-tested end to end: switched the
+  running server to `it` via the dashboard, confirmed the listener
+  rebuilt cleanly ("listener ready (language=it)") and the language
+  selector reflects it on page load
+- Dashboard log/status timestamps now self-correct against the Pi's
+  (possibly wrong, no-RTC/no-NTP-in-AP-mode) clock — live-tested by
+  faking a 3h17m server clock skew and confirming the "Clock" card
+  detected exactly that offset and the log's displayed time matched
+  real wall-clock time, not the skewed one
+- Detection-to-response latency work (partial-result matching, smaller
+  mic block size, clip preloading, low-latency audio streams) — smoke
+  tested (a faked Vosk recognizer confirms the listener now reacts to a
+  partial hypothesis rather than waiting for a finalized result; clip
+  cache warm-up verified) and live-tested end to end (server starts,
+  preloads clips, listener initializes, manual trigger still plays
+  correctly) — **not yet judged by ear on real hardware with a real
+  spoken keyword**, which is really the only way to feel whether the
+  partial-result change actually feels snappier in practice.
+- Cooldown is now adjustable live from the dashboard (default lowered to
+  5s), with a live numeric readout while dragging — live-tested end to
+  end: dragged the slider to 12 in a real browser, confirmed
+  `config.trigger.cooldown_seconds` updated and the change was logged.
 - Standalone WLAN AP mode built (`network.ap_mode` config +
   `scripts/setup_wifi_ap.sh`, NetworkManager hotspot via `nmcli`) and
   smoke-tested for config parsing/dashboard status only — **not yet run for
@@ -376,9 +511,10 @@ so the pipeline has something to play while you're setting up.
 - Keyword list is a blunt substring match on Vosk's transcription — works
   in quiet/moderate noise, may need retuning (or a fallback sound-level
   trigger) once tested in a realistic outdoor SAR training environment.
-- Only English and German models are wired up; add more by extending
-  `MODEL_NAMES` in `src/victimsim/config.py`, the `case` in
-  `scripts/download_vosk_model.sh`, and a `trigger.keywords.<lang>` list.
+- Italian keywords (`trigger.keywords.it`) haven't been reviewed by a
+  native speaker or tested against a real Italian speaker's voice — only
+  that the phrases parse and the Vosk model loads/recognizes audio at
+  all. Worth a sanity check before relying on it in the field.
 - Real recordings only cover one or a few takes per category so far — more
   variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
   would help against repetition during longer training sessions.

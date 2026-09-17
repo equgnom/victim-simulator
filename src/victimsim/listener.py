@@ -23,7 +23,7 @@ class KeywordListener:
         device: int | None,
         keywords: list[str],
         channels: int = 1,
-        block_size: int = 8000,
+        block_size: int = 3200,
     ):
         self.model = Model(str(model_path))
         self.samplerate = samplerate
@@ -49,6 +49,16 @@ class KeywordListener:
     def wait_for_keyword(self, mute_event=None, reload_event=None) -> tuple[str, str] | None:
         """Blocks until a keyword is heard; returns (matched_keyword, full_text).
 
+        Checks Vosk's streaming *partial* hypothesis on every block, not
+        just the finalized result after it detects end-of-utterance silence
+        — waiting for that endpoint is the single biggest source of
+        detection latency, often several hundred ms to over a second, so
+        this reacts as soon as a keyword shows up in the in-progress guess
+        instead. Trade-off: a partial hypothesis can still change before
+        Vosk settles on it, so this can occasionally trigger a beat early
+        on text that isn't quite final — acceptable here since an extra or
+        early trigger just means one more response, not a wrong reading.
+
         If `mute_event` is set (a threading.Event), audio is still read to keep
         the stream alive, but discarded while it's set — used to mute listening
         while the victim's own response is playing, so it doesn't re-trigger on
@@ -65,6 +75,7 @@ class KeywordListener:
             device=self.device,
             dtype="int16",
             channels=self.channels,
+            latency="low",
         ) as stream:
             while True:
                 if reload_event is not None and reload_event.is_set():
@@ -76,6 +87,14 @@ class KeywordListener:
                 if recognizer.AcceptWaveform(mono):
                     result = json.loads(recognizer.Result())
                     text = result.get("text", "")
+                    if not text:
+                        continue
+                    kw = self._matches(text)
+                    if kw:
+                        return kw, text
+                else:
+                    partial = json.loads(recognizer.PartialResult())
+                    text = partial.get("partial", "")
                     if not text:
                         continue
                     kw = self._matches(text)

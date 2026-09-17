@@ -112,6 +112,49 @@ def create_app(state: SharedState) -> Flask:
         )
         return jsonify(state.status())
 
+    @app.post("/api/cooldown")
+    def set_cooldown():
+        """Body: {"cooldown_seconds": 5} — minimum gap between any two
+        responses, keyword-triggered or spontaneous."""
+        data = request.get_json(silent=True) or {}
+        try:
+            cooldown = float(data.get("cooldown_seconds"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "'cooldown_seconds' must be a number"}), 400
+        if not 0 <= cooldown <= 300:
+            return jsonify({"error": "'cooldown_seconds' must be between 0 and 300"}), 400
+        with state.lock:
+            state.config.trigger.cooldown_seconds = cooldown
+        state.add_log("system", f"cooldown set to {cooldown:.0f}s via web dashboard")
+        return jsonify(state.status())
+
+    @app.post("/api/voice-categories")
+    def set_voice_categories():
+        """Body: {"enabled_categories": ["shout", "moan"]} — checked boxes
+        on the dashboard. Must be a non-empty subset of the known
+        categories (config.trigger.response_categories) — there always has
+        to be something left to play."""
+        data = request.get_json(silent=True) or {}
+        requested = data.get("enabled_categories")
+        if not isinstance(requested, list) or not all(isinstance(c, str) for c in requested):
+            return jsonify({"error": "'enabled_categories' must be a list of strings"}), 400
+
+        known = set(state.config.trigger.response_categories)
+        unknown = [c for c in requested if c not in known]
+        if unknown:
+            return jsonify({"error": f"unknown categories: {unknown}. Known: {sorted(known)}"}), 400
+
+        deduped = sorted(set(requested), key=requested.index)
+        if not deduped:
+            return jsonify({"error": "at least one voice category must stay enabled"}), 400
+
+        with state.lock:
+            state.config.trigger.enabled_categories = deduped
+        state.add_log(
+            "system", f"voice categories set to {deduped} via web dashboard"
+        )
+        return jsonify(state.status())
+
     @app.post("/api/trigger")
     def manual_trigger():
         if state.responder is None or not state.responder.ready():

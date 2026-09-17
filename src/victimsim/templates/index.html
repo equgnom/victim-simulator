@@ -20,6 +20,8 @@
   .card { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 0.75rem; }
   .card .label { font-size: 0.7rem; color: #999; text-transform: uppercase; letter-spacing: 0.03em; }
   .card .value { font-size: 1.05rem; margin-top: 0.3rem; word-break: break-word; }
+  .card.warning { border-color: #e5a83a; background: #2a1f0f; }
+  .card.warning .value { color: #ffb547; }
   .controls {
     display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; margin-bottom: 1rem;
     align-items: center; background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
@@ -33,6 +35,9 @@
   }
   input[type=range] { padding: 0; width: 140px; }
   input[type=checkbox] { width: 1.2rem; height: 1.2rem; align-self: flex-start; accent-color: #4caf50; }
+  .checkbox-row { display: flex; gap: 0.75rem; }
+  .checkbox-item { display: flex; align-items: center; gap: 0.35rem; font-size: 0.95rem; text-transform: capitalize; }
+  .checkbox-item input[type=checkbox] { align-self: auto; }
   button { cursor: pointer; align-self: flex-end; }
   button:hover { background: #333; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -62,7 +67,8 @@
     <div class="card"><div class="label">Last heard</div><div class="value" id="s-last-heard">-</div></div>
     <div class="card"><div class="label">Last response</div><div class="value" id="s-last-response">-</div></div>
     <div class="card"><div class="label">Counts</div><div class="value" id="s-counts">-</div></div>
-    <div class="card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
+    <div class="card" id="temp-card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
+    <div class="card"><div class="label">Clock</div><div class="value" id="s-clock">-</div></div>
     <div class="card"><div class="label">Knocking mode</div><div class="value" id="s-knock-loop">-</div></div>
     <div class="card"><div class="label">Network</div><div class="value" id="s-network">-</div></div>
   </div>
@@ -73,6 +79,7 @@
       <select id="language">
         <option value="en">English</option>
         <option value="de">German</option>
+        <option value="it">Italian</option>
       </select>
     </div>
     <div class="field">
@@ -92,8 +99,16 @@
       <input type="range" id="knock-volume" min="0" max="1" step="0.05">
     </div>
     <div class="field">
+      <label for="cooldown">Cooldown (<span id="cooldown-value">-</span>s)</label>
+      <input type="range" id="cooldown" min="0" max="60" step="1">
+    </div>
+    <div class="field">
       <label for="knock-loop">Knocking mode (loop)</label>
       <input type="checkbox" id="knock-loop">
+    </div>
+    <div class="field">
+      <label>Voice sounds</label>
+      <div class="checkbox-row" id="voice-categories"></div>
     </div>
     <button id="trigger">Trigger now</button>
     <span id="error"></span>
@@ -106,8 +121,66 @@ let sinceTs = 0;
 const logEl = document.getElementById('log');
 const errEl = document.getElementById('error');
 
+// The Pi's clock may be wrong (no battery-backed RTC, no NTP in AP mode).
+// clockOffsetSeconds shifts every displayed timestamp to line up with this
+// device's own clock instead — recomputed on every status poll, so it
+// self-corrects if the Pi's clock later gets fixed (e.g. it regains
+// internet and syncs via NTP) mid-session.
+let clockOffsetSeconds = 0;
+
 function fmtTs(ts) {
-  return new Date(ts * 1000).toLocaleTimeString();
+  return new Date((ts + clockOffsetSeconds) * 1000).toLocaleTimeString();
+}
+
+function fmtOffset(seconds) {
+  const abs = Math.abs(seconds);
+  if (abs < 5) return 'in sync';
+  const sign = seconds > 0 ? '+' : '-';
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = Math.floor(abs % 60);
+  const parts = [];
+  if (h) parts.push(`${h}h`);
+  if (h || m) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return `${sign}${parts.join(' ')} (Pi clock)`;
+}
+
+const voiceCategoriesEl = document.getElementById('voice-categories');
+
+function onVoiceCategoryChange() {
+  const checked = Array.from(voiceCategoriesEl.querySelectorAll('input[type=checkbox]:checked'))
+    .map(el => el.dataset.category);
+  postJson('/api/voice-categories', { enabled_categories: checked });
+}
+
+function renderVoiceCategories(available, enabled) {
+  // Only rebuild the checkboxes if the known category list itself changed —
+  // rebuilding every poll would drop focus/mid-click state.
+  const key = JSON.stringify(available);
+  if (voiceCategoriesEl.dataset.available !== key) {
+    voiceCategoriesEl.dataset.available = key;
+    voiceCategoriesEl.innerHTML = '';
+    for (const category of available) {
+      const label = document.createElement('label');
+      label.className = 'checkbox-item';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = `cat-${category}`;
+      input.dataset.category = category;
+      input.addEventListener('change', onVoiceCategoryChange);
+      label.appendChild(input);
+      label.append(category);
+      voiceCategoriesEl.appendChild(label);
+    }
+  }
+  // Always sync (see the comment by the knock-loop checkbox above for why
+  // checkboxes don't get the "skip while focused" treatment).
+  const enabledSet = new Set(enabled);
+  for (const category of available) {
+    const input = document.getElementById(`cat-${category}`);
+    if (input) input.checked = enabledSet.has(category);
+  }
 }
 
 async function pollStatus() {
@@ -115,6 +188,8 @@ async function pollStatus() {
     const res = await fetch('/api/status');
     if (!res.ok) return;
     const s = await res.json();
+    clockOffsetSeconds = (Date.now() / 1000) - s.server_time;
+    document.getElementById('s-clock').textContent = fmtOffset(clockOffsetSeconds);
 
     document.getElementById('s-listener').innerHTML =
       `<span class="dot ${s.listener_ready ? 'ok' : 'bad'}"></span>${s.listener_ready ? 'listening' : 'not ready'}`;
@@ -124,7 +199,10 @@ async function pollStatus() {
     document.getElementById('s-last-response').textContent = s.last_response
       ? `${s.last_response.category}${s.last_response.knocked ? ' + knock' : ''} (${fmtTs(s.last_response.ts)})` : 'none yet';
     document.getElementById('s-counts').textContent = `${s.heard_count} heard / ${s.response_count} responses`;
-    document.getElementById('s-temp').textContent = s.cpu_temp_c != null ? s.cpu_temp_c + ' °C' : 'n/a';
+    document.getElementById('s-temp').textContent = s.cpu_temp_c != null
+      ? s.cpu_temp_c + ' °C' + (s.cpu_temp_warning ? ' — warning: near throttle temp' : '')
+      : 'n/a';
+    document.getElementById('temp-card').classList.toggle('warning', !!s.cpu_temp_warning);
     document.getElementById('s-knock-loop').textContent = s.knock_loop_enabled ? 'on (looping)' : 'off';
     document.getElementById('s-network').textContent = s.ap_mode_enabled
       ? `AP mode ("${s.ap_mode_ssid}")` : 'client WiFi';
@@ -134,7 +212,14 @@ async function pollStatus() {
     if (active !== 'mode') document.getElementById('mode').value = s.mode;
     if (active !== 'voice-volume') document.getElementById('voice-volume').value = s.voice_volume;
     if (active !== 'knock-volume') document.getElementById('knock-volume').value = s.knock_volume;
-    if (active !== 'knock-loop') document.getElementById('knock-loop').checked = s.knock_loop_enabled;
+    if (active !== 'cooldown') document.getElementById('cooldown').value = s.cooldown_seconds;
+    document.getElementById('cooldown-value').textContent = Math.round(s.cooldown_seconds);
+    // Checkboxes retain focus after a click (unlike a slider mid-drag or an
+    // open dropdown), so always sync them — otherwise a rejected change
+    // (e.g. unchecking the last voice category) would stay stuck showing
+    // the wrong state until something else takes focus.
+    document.getElementById('knock-loop').checked = s.knock_loop_enabled;
+    renderVoiceCategories(s.voice_categories.available, s.voice_categories.enabled);
   } catch (e) {
     // dashboard server briefly unreachable (e.g. mid-restart) — ignore, retry next tick
   }
@@ -180,6 +265,10 @@ document.getElementById('mode').addEventListener('change', e => postJson('/api/m
 document.getElementById('voice-volume').addEventListener('change', e => postJson('/api/volume', { voice: parseFloat(e.target.value) }));
 document.getElementById('knock-volume').addEventListener('change', e => postJson('/api/volume', { knock: parseFloat(e.target.value) }));
 document.getElementById('knock-loop').addEventListener('change', e => postJson('/api/knock-loop', { enabled: e.target.checked }));
+document.getElementById('cooldown').addEventListener('input', e => {
+  document.getElementById('cooldown-value').textContent = e.target.value; // live readout while dragging
+});
+document.getElementById('cooldown').addEventListener('change', e => postJson('/api/cooldown', { cooldown_seconds: parseFloat(e.target.value) }));
 document.getElementById('trigger').addEventListener('click', () => postJson('/api/trigger', {}));
 
 pollStatus();

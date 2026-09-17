@@ -57,6 +57,16 @@ class Responder:
             # "Knocking mode" is a deliberate override: guarantee a knock.
             knock_probability = 1.0
 
+        # Global per-category on/off (dashboard checkboxes) filters whatever
+        # the mode above selected. If that leaves nothing (e.g. "weak" only
+        # offers moan/cry and both are unchecked), fall back to whatever's
+        # enabled globally rather than crash — enabled_categories itself is
+        # never empty (the API layer refuses to let it become so).
+        enabled = set(self.config.trigger.enabled_categories)
+        categories = [c for c in categories if c in enabled] or [
+            c for c in self.config.trigger.response_categories if c in enabled
+        ]
+
         voice_volume = self.config.volume.voice * multiplier
         knock_volume = self.config.volume.knock * multiplier
         return categories, knock_probability, voice_volume, knock_volume
