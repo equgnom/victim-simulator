@@ -44,18 +44,12 @@ class Responder:
         profile = self.config.behavior.active_profile()
         if profile is None:
             categories = self.config.trigger.response_categories
-            knock_probability = self.config.knock.probability
             multiplier = 1.0
         else:
             categories = profile.response_categories
-            knock_probability = profile.knock_probability
             multiplier = profile.volume_multiplier
 
-        if not self.config.knock.enabled:
-            knock_probability = 0.0
-        elif self.config.knock.loop_enabled:
-            # "Knocking mode" is a deliberate override: guarantee a knock.
-            knock_probability = 1.0
+        knock_probability = self.config.effective_knock_probability()
 
         # Global per-category on/off (dashboard checkboxes) filters whatever
         # the mode above selected. If that leaves nothing (e.g. "weak" only
@@ -71,12 +65,48 @@ class Responder:
         knock_volume = self.config.volume.knock * multiplier
         return categories, knock_probability, voice_volume, knock_volume
 
-    def respond(self, reason: str) -> None:
+    def _reply_category(self) -> tuple[str, bool] | None:
+        """Where a keyword reply's sound comes from: (category, is_placeholder), or
+        None if neither the dedicated category nor its stand-in has any clips."""
+        trigger = self.config.trigger
+        if self.sound_bank.has_clips(trigger.reply_category):
+            return trigger.reply_category, False
+        if self.sound_bank.has_clips(trigger.reply_fallback_category):
+            return trigger.reply_fallback_category, True
+        return None
+
+    def reply_info(self) -> dict:
+        """For the dashboard: is the dedicated reply set in place yet?"""
+        trigger = self.config.trigger
+        clips = self.sound_bank.count(trigger.reply_category)
+        return {
+            "category": trigger.reply_category,
+            "clips": clips,
+            "placeholder": trigger.reply_fallback_category
+            if clips == 0 and self.sound_bank.has_clips(trigger.reply_fallback_category)
+            else None,
+        }
+
+    def respond(self, reason: str, reply: bool = False) -> None:
         """`reason` is a short label for the log line, e.g. "heard 'hello'" or
-        "spontaneous call"."""
+        "spontaneous call".
+
+        `reply=True` (a keyword was heard) plays the dedicated reply sounds
+        instead of a random shout/cry/moan — see TriggerConfig.reply_category.
+        Volume and knock chance still follow the current mode, but the
+        voice-category checkboxes and the mode's category list don't apply:
+        those choose among spontaneous-call sounds.
+        """
         categories, knock_probability, voice_volume, knock_volume = self._strength_params()
 
-        category = random.choice(categories)
+        placeholder = False
+        category = None
+        if reply:
+            choice = self._reply_category()
+            if choice is not None:
+                category, placeholder = choice
+        if category is None:
+            category = random.choice(categories)
         voice_path = self.sound_bank.pick(category)
         voice = audio_hal.load_clip(voice_path, self.config.audio.playback_sample_rate)
 
@@ -106,6 +136,11 @@ class Responder:
         log_line = (
             f"[{reason}] -> playing {category}/{voice_path.name}"
             + (
+                f" [stand-in: no clips in assets/sounds/{self.config.trigger.reply_category}/ yet]"
+                if placeholder
+                else ""
+            )
+            + (
                 f" + knock/{knock_path.name}"
                 + (f" (looped x{self.config.knock.loop_count})" if self.config.knock.loop_enabled else "")
                 if play_knock
@@ -125,4 +160,6 @@ class Responder:
             self.busy.clear()
             self._last_response_at = time.monotonic()
             if self.state is not None:
-                self.state.note_response(reason, category, play_knock)
+                self.state.note_response(
+                    reason, f"{category} (reply stand-in)" if placeholder else category, play_knock
+                )

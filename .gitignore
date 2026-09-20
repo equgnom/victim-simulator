@@ -4,3 +4,5 @@ __pycache__/
 assets/models/
 .pytest_cache/
 .~lock.*#
+runtime_settings.json
+runtime_settings.json.*.tmp

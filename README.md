@@ -58,8 +58,9 @@ IP, on startup). The dashboard shows:
   hits, and system events (listener ready, mode/language changes)
 - **Controls**: switch language (en/de) or behavior mode
   (responsive/distress/weak) live — no restart needed — adjust voice and
-  knock volume independently, toggle "Knocking mode" (see below), and a
-  "Trigger now" button to fire a test response on demand
+  knock volume independently, toggle "Knocking mode" (see below), a
+  "Trigger now" button to fire a test response on demand, "Knock on every
+  response", and "Reset to defaults" (see the sections below)
 
 Switching language reloads the Vosk model and restarts the mic stream in
 the background (briefly shows "not ready" while it happens); switching
@@ -75,6 +76,19 @@ every response for as long as it's enabled, bypassing `knock.probability`
 (and the per-mode `knock_probability` in `behavior.profiles`) — the point
 is a reliable, obvious continuous-knocking demo/test, not another random
 chance. Turn it back off to return to normal probabilistic single knocks.
+
+### Knock on every response
+
+The dashboard's **Knock on every response** button forces the chance that a
+response includes a knock to 100% — a single knock per response, unlike
+Knocking mode, which loops it. Each mode has its own configured chance
+(`knock.probability` for responsive, `knock_probability` in each
+`behavior.profiles` entry), so rather than overwrite those it sets an
+override on top: it works the same in every mode, your tuned numbers stay
+untouched, and clicking the button again clears the override and puts them
+back. The "Knock chance" status card always shows the effective value in the
+current mode (`50%`, `100% (forced)`, `100% (knocking mode)`). Like the
+other dashboard settings it's saved across restarts.
 
 ### Independent voice/knock volume
 
@@ -108,6 +122,25 @@ bash scripts/download_vosk_model.sh de
 bash scripts/download_vosk_model.sh it
 ```
 
+**The models are not in git.** They're ~70-90 MB each and gitignored
+(`assets/models/`), so `git pull` never brings them: every device — the Pi
+included — must run the download command above for each language it should
+use, once, and it needs internet (Ethernet or client WiFi, not the AP). Pull
+a commit that adds a language and the dashboard will offer it, but it won't
+work until the model is downloaded on that device. The dashboard makes this
+hard to miss rather than silent:
+
+- languages whose model isn't installed show as `Italian (not installed)`
+  and can't be selected;
+- if a choice is refused anyway (e.g. a stale page), a red banner says the
+  language was **not** changed and shows the exact download command, the
+  dropdown snaps back to the language that's really running, and the
+  refusal is written to the log;
+- at startup, a `config.yaml` language (or saved dashboard language) whose
+  model is missing is reported once — `NOT LISTENING: Vosk model for 'it'
+  not found ...` in `journalctl -u victimsim` and the dashboard log — and
+  the listener card shows "not ready".
+
 Add more phrases by editing `trigger.keywords.<en|de|it>` in `config.yaml`
 (case-insensitive substring match against what Vosk hears). Add another
 language entirely by extending `MODEL_NAMES` in
@@ -131,9 +164,38 @@ how "alive" the victim is:
 
 In `distress`/`weak` modes, the listener keeps running too — the victim
 still responds to being spoken to directly, and does so at that mode's
-strength (a weak victim sounds weak whether it called out on its own or was
-just answered to). Tune the numbers per mode under `behavior.profiles` in
-`config.yaml`.
+strength: volume and knock chance follow the mode, so a weak victim answers
+quietly just like it calls quietly. (Which *sound* plays for a keyword is
+separate — see "Keyword replies".) Tune the numbers per mode under
+`behavior.profiles` in `config.yaml`.
+
+## Keyword replies
+
+When the listener hears a keyword, the victim answers with **dedicated reply
+sounds** from `assets/sounds/reply/` — separate from `shout/`, `cry/` and
+`moan/`, which are the victim's own spontaneous calls (`distress`/`weak`
+mode). Drop `.wav` files into `assets/sounds/reply/` (any filename; one is
+picked at random each time, never the same one twice in a row) — see the
+`README.txt` in that folder. Files added while the simulator is running are
+used without a restart.
+
+**Until real reply recordings exist, the `cry` sounds stand in** (the folder
+is empty for now), so a keyword is never answered with silence. It switches
+over by itself the moment a `.wav` appears in `reply/` — nothing to delete or
+reconfigure. Which folders are used is `trigger.reply_category` (default
+`reply`) and `trigger.reply_fallback_category` (default `cry`) in
+`config.yaml`. You can see what's in effect at a glance: the dashboard's
+**Keyword reply** card shows `stand-in: cry (no reply files yet)` or
+`reply: N files`, the startup output says the same, and each stand-in play is
+marked `[stand-in: ...]` in the log.
+
+What still applies to a reply: the current mode's volume multiplier and knock
+chance, the voice/knock volume sliders, the cooldown, knocking mode and
+"Knock on every response". What doesn't: the *Voice sounds* checkboxes and a
+mode's own category list — those choose among spontaneous-call sounds, so
+unchecking "Cry" won't silence the cry *stand-in* for replies (it stops
+mattering once real reply files are in). The dashboard's **Trigger now**
+button is a generic test and still plays a random shout/cry/moan, not a reply.
 
 ## Voice sound selection
 
@@ -146,13 +208,56 @@ holds; unchecking one of those two just narrows it further). At least one
 category must always stay enabled — the dashboard rejects trying to
 uncheck the last one, with an inline error explaining why.
 
+These choose among the victim's *spontaneous-call* sounds (`distress`/`weak`
+mode) and the "Trigger now" test button. Keyword hits are answered from their
+own dedicated set instead — see "Keyword replies".
+
 ## Cooldown
 
 `trigger.cooldown_seconds` in `config.yaml` (default `5`), or the
 "Cooldown" slider on the dashboard — the minimum gap between any two
-responses, keyword-triggered or spontaneous, so it doesn't spam. Range
-0-300s. The slider shows a live numeric readout while dragging and posts
-the change on release, not on every pixel of drag.
+responses, keyword-triggered or spontaneous, so it doesn't spam. The
+dashboard slider covers 0-10s (whole seconds) with a live numeric readout
+while dragging; it posts the change on release, not on every pixel of
+drag. `config.yaml` and the API still accept anything up to 300s — if the
+configured value is above 10 the slider just pins at its right end while
+the readout keeps showing the real value.
+
+## Persistent dashboard settings
+
+Everything you change from the dashboard — language, behavior mode, voice
+and knock volume, knocking mode, the knock-chance override, cooldown, and
+the voice-sound checkboxes — is saved immediately to `runtime_settings.json` in the repo root and
+re-applied on the next start. So a service restart, a crash-loop recovery,
+a power cycle, or a lost WiFi/phone connection all come back up with your
+latest configuration instead of falling back to `config.yaml`. (Losing the
+WiFi connection alone never reset anything — the app just keeps running with
+its in-memory settings — but a restart used to.)
+
+- **Precedence:** `config.yaml` provides the defaults, `runtime_settings.json`
+  layers on top of it. That means editing one of these eight values in
+  `config.yaml` has *no visible effect* once it's been saved from the
+  dashboard — the saved value wins. The startup log/console says
+  `restored saved dashboard settings from runtime_settings.json: ...` so
+  you can tell when that's happening.
+- **Reset to `config.yaml`'s values:** the dashboard's **Reset to defaults**
+  button (asks for confirmation). It puts all eight settings back to what
+  `config.yaml` says, takes effect immediately (switching the listener's
+  language back if needed), and deletes the saved file so a restart doesn't
+  bring the old values back. Without a browser at hand, the equivalent is
+  `rm ~/victim-simulator/runtime_settings.json && sudo systemctl restart victimsim`.
+- **Not synced by git:** the file is gitignored, so `git pull` on the Pi
+  never conflicts with it (unlike `config.yaml`) and the Pi keeps its own.
+  Anything else in `config.yaml` (devices, keywords, behavior profiles,
+  AP mode, ...) isn't dashboard-adjustable and isn't affected.
+- **Safe against bad files:** writes are atomic and fsynced (a power cut
+  mid-write can't leave a truncated file), and loading is forgiving — a
+  corrupt file, unknown keys, out-of-range values, or a saved language
+  whose Vosk model isn't installed are ignored individually and
+  `config.yaml`'s value is used for them, so it can never stop the
+  simulator from starting. If the file can't be written (full or read-only
+  SD card) the dashboard keeps working and the failure shows up in the log.
+- `--settings-file PATH` overrides the location (handy for testing).
 
 ## CPU temperature warning
 
@@ -284,6 +389,45 @@ judged by ear on the actual hardware.
   correctly) — **not yet judged by ear on real hardware with a real
   spoken keyword**, which is really the only way to feel whether the
   partial-result change actually feels snappier in practice.
+- Keyword replies: a heard keyword is now answered with dedicated sounds from
+  `assets/sounds/reply/`, with the `cry` sounds standing in while that folder
+  is empty (and switching over by themselves once real files appear). Covered
+  by tests (dedicated vs. stand-in vs. nothing available, spontaneous calls
+  never using it, mode volume still applying, and the `main.py` wiring —
+  checked to fail if the wiring or the fallback is broken) and run end to
+  end: real spoken Italian "ciao" through the real listener/Vosk model/
+  responder played the cry stand-in and, after a file was dropped into
+  `reply/` mid-run, played that file instead; the dashboard card followed.
+  Not yet judged by ear on the Pi.
+- Language selection fix (field report: choosing Italian "had no effect"):
+  two causes, both fixed. (1) The Pi never had the Italian model — it's
+  gitignored so `git pull` doesn't bring it, and the README's Pi steps only
+  listed en/de (now include it). (2) The dashboard hid that: the refusal
+  was a tiny inline message, unlogged, and the dropdown kept *showing*
+  Italian (a focused control skipped resyncing) while the listener stayed on
+  German. Now: uninstalled languages are marked and disabled, a refused choice
+  gets a sticky banner + log entry + the fix command, and controls resync
+  right after every action. Reproduced in a real browser by hiding the
+  model, fixed, re-verified; plus startup warnings for a missing configured or
+  saved language, and tests (missing-model refusal, keyword-vocabulary
+  check per language, every language has keywords + a download case).
+  **On the Pi you still need to run `bash scripts/download_vosk_model.sh it`.**
+- Dashboard: "Reset to defaults" button, cooldown slider narrowed to 0-10s,
+  and a "Knock on every response" toggle (plus a "Knock chance" status
+  card) — pytest + smoke-tested (the override in every mode, reset
+  restoring `config.yaml`'s values and deleting the saved file) and
+  live-tested in a real browser against a pre-seeded saved state: the
+  buttons gave immediate feedback, Reset went back to `config.yaml`'s
+  values rather than the saved ones, and a restart afterwards came up
+  clean. Not yet tried on the Pi/phone.
+- Dashboard settings now persist across restarts (`runtime_settings.json`,
+  see "Persistent dashboard settings") — tested with a pytest suite for the
+  store (roundtrip, corrupt/stale/out-of-range files, atomic writes) plus a
+  smoke check driving all six endpoints then rebuilding config from the
+  saved file, and live-tested by changing every setting over HTTP,
+  `kill -9`-ing the app, restarting it, and confirming everything (including
+  the listener's language) came back; also confirmed a truncated file just
+  falls back to `config.yaml`. Not yet exercised on the Pi itself.
 - Cooldown is now adjustable live from the dashboard (default lowered to
   5s), with a live numeric readout while dragging — live-tested end to
   end: dragged the slider to 12 in a real browser, confirmed
@@ -319,8 +463,9 @@ PYTHONPATH=src .venv/bin/python -m victimsim.main
 ```
 
 Open the printed dashboard URL in a browser, or say "hello" (or any phrase
-in `trigger.keywords.<language>`) near the mic — it should respond with a
-random shout/cry/moan, and sometimes a knock. Switch to `distress` or `weak`
+in `trigger.keywords.<language>`) near the mic — it should answer with a sound
+from `assets/sounds/reply/` (the cry sounds until you add some), and sometimes
+a knock. Switch to `distress` or `weak`
 mode (in `config.yaml` or the dashboard) to also have it call out on its own.
 
 If `sounddevice` fails to import with a `libportaudio` error, install
@@ -391,6 +536,7 @@ python3 -m venv .venv
 .venv/bin/python scripts/generate_placeholder_sounds.py   # or scp real recordings into assets/sounds/
 bash scripts/download_vosk_model.sh en
 bash scripts/download_vosk_model.sh de
+bash scripts/download_vosk_model.sh it
 PYTHONPATH=src .venv/bin/python -m victimsim.main --list-devices
 ```
 
@@ -494,9 +640,11 @@ live mic conversation or a running server.
 
 `assets/sounds/` now has real recordings, not the synthesized placeholders
 (shout/cry/moan/knock — multiple takes each). Add more takes any time by
-dropping `.wav` files into `assets/sounds/<shout|cry|moan|knock>/` — any
-filename works, `SoundBank` picks randomly within each folder (knock
-included) and avoids repeating the same clip twice in a row.
+dropping `.wav` files into `assets/sounds/<shout|cry|moan|knock|reply>/` —
+any filename works, `SoundBank` picks randomly within each folder (knock
+included) and avoids repeating the same clip twice in a row. `reply/` is
+still empty: it's where the dedicated keyword-reply recordings go (the `cry`
+sounds stand in until then — see "Keyword replies").
 
 For a fresh checkout with no recordings yet,
 `scripts/generate_placeholder_sounds.py` synthesizes rough stand-in tones
@@ -512,9 +660,14 @@ so the pipeline has something to play while you're setting up.
   in quiet/moderate noise, may need retuning (or a fallback sound-level
   trigger) once tested in a realistic outdoor SAR training environment.
 - Italian keywords (`trigger.keywords.it`) haven't been reviewed by a
-  native speaker or tested against a real Italian speaker's voice — only
-  that the phrases parse and the Vosk model loads/recognizes audio at
-  all. Worth a sanity check before relying on it in the field.
+  native speaker. Verified so far: every keyword word exists in the Italian
+  model's vocabulary (a pytest guards this for all languages), and real
+  spoken "ciao" and "nessuno" (Wikimedia Commons pronunciation clips, fed
+  through the real listener) were recognized — while the same audio through
+  the German model wasn't. Not verified: the multi-word phrases ("c'è
+  qualcuno", "mi senti", "squadra di soccorso") and anything through the
+  actual ReSpeaker in the field. Worth a real-voice check before relying on
+  it.
 - Real recordings only cover one or a few takes per category so far — more
   variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
   would help against repetition during longer training sessions.

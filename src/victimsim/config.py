@@ -18,6 +18,24 @@ MODEL_NAMES = {
     "it": "vosk-model-small-it-0.22",
 }
 
+BEHAVIOR_MODES = ("responsive", "distress", "weak")
+
+
+def language_installed(language: str, models_dir: Path | None = None) -> bool:
+    """Whether the Vosk model for `language` is on disk. The models are large
+    and gitignored, so every device has to download its own copy
+    (scripts/download_vosk_model.sh) — a `git pull` never brings them."""
+    name = MODEL_NAMES.get(language)
+    return name is not None and ((models_dir or MODELS_DIR) / name).exists()
+
+
+def installed_languages(models_dir: Path | None = None) -> dict[str, bool]:
+    return {lang: language_installed(lang, models_dir) for lang in MODEL_NAMES}
+
+
+def download_hint(language: str) -> str:
+    return f"bash scripts/download_vosk_model.sh {language}"
+
 
 @dataclass
 class AudioConfig:
@@ -46,6 +64,14 @@ class TriggerConfig:
     # left empty. Applies on top of whatever a behavior profile's own
     # response_categories says (see Responder._strength_params).
     enabled_categories: list[str] = field(default_factory=list)
+    # A keyword hit plays its own dedicated sounds from assets/sounds/<reply_category>/
+    # (independent of the shout/cry/moan categories above, which are for
+    # spontaneous calls). While that folder has no .wav files, the clips of
+    # reply_fallback_category stand in for it, so a keyword is never answered
+    # with silence — and dropping real files into the folder switches over
+    # automatically, nothing to delete.
+    reply_category: str = "reply"
+    reply_fallback_category: str = "cry"
 
     def keywords_for(self, language: str) -> list[str]:
         return self.keywords.get(language, self.keywords.get("en", []))
@@ -84,6 +110,10 @@ class KnockConfig:
     loop_enabled: bool = False
     loop_count: int = 4
     loop_gap_seconds: float = 0.4
+    # Set from the dashboard's "Knock on every response" button (1.0) to force
+    # the knock chance regardless of mode, without overwriting the tuned
+    # probabilities in config.yaml / behavior.profiles. None = not overridden.
+    probability_override: float | None = None
 
 
 @dataclass
@@ -136,6 +166,18 @@ class Config:
     network: NetworkConfig
     monitoring: MonitoringConfig
     language: str = "en"
+
+    def effective_knock_probability(self) -> float:
+        """Chance that a response includes a knock, right now. Single source of
+        truth for both the Responder and the dashboard's display."""
+        if not self.knock.enabled:
+            return 0.0
+        if self.knock.loop_enabled:
+            return 1.0  # "knocking mode" guarantees a knock
+        if self.knock.probability_override is not None:
+            return self.knock.probability_override
+        profile = self.behavior.active_profile()
+        return profile.knock_probability if profile is not None else self.knock.probability
 
     @property
     def model_name(self) -> str:

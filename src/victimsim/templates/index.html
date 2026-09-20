@@ -41,7 +41,14 @@
   button { cursor: pointer; align-self: flex-end; }
   button:hover { background: #333; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  #error { color: #f66; font-size: 0.9rem; align-self: center; }
+  button.active { border-color: #4caf50; background: #16281a; color: #9be3a4; }
+  button.danger { border-color: #7a3b3b; color: #f0a0a0; }
+  button.danger:hover { background: #3a1f1f; }
+  .banner {
+    position: sticky; top: 0; z-index: 10; margin: 0 0 0.75rem; padding: 0.6rem 0.8rem;
+    border: 1px solid #a33; border-radius: 8px; background: #2a1010; color: #ffb3b3;
+    font-size: 0.95rem; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+  }
   #log {
     background: #000; border: 1px solid #333; border-radius: 8px;
     padding: 0.5rem 0.75rem; height: 45vh; overflow-y: auto;
@@ -60,6 +67,7 @@
 </head>
 <body>
   <h1>Responsive Victim Simulator</h1>
+  <div id="error" class="banner" role="alert" title="Click to dismiss" hidden></div>
 
   <div class="grid">
     <div class="card"><div class="label">Listener</div><div class="value" id="s-listener">-</div></div>
@@ -70,6 +78,8 @@
     <div class="card" id="temp-card"><div class="label">CPU temp</div><div class="value" id="s-temp">-</div></div>
     <div class="card"><div class="label">Clock</div><div class="value" id="s-clock">-</div></div>
     <div class="card"><div class="label">Knocking mode</div><div class="value" id="s-knock-loop">-</div></div>
+    <div class="card"><div class="label">Keyword reply</div><div class="value" id="s-reply">-</div></div>
+    <div class="card"><div class="label">Knock chance</div><div class="value" id="s-knock-chance">-</div></div>
     <div class="card"><div class="label">Network</div><div class="value" id="s-network">-</div></div>
   </div>
 
@@ -100,7 +110,7 @@
     </div>
     <div class="field">
       <label for="cooldown">Cooldown (<span id="cooldown-value">-</span>s)</label>
-      <input type="range" id="cooldown" min="0" max="60" step="1">
+      <input type="range" id="cooldown" min="0" max="10" step="1">
     </div>
     <div class="field">
       <label for="knock-loop">Knocking mode (loop)</label>
@@ -111,7 +121,8 @@
       <div class="checkbox-row" id="voice-categories"></div>
     </div>
     <button id="trigger">Trigger now</button>
-    <span id="error"></span>
+    <button id="knock-always" title="Force the chance that a response includes a knock to 100% in every mode. Click again to undo.">Knock on every response</button>
+    <button id="reset" class="danger" title="Set language, mode, volumes, cooldown, knocking and voice sounds back to config.yaml's values">Reset to defaults</button>
   </div>
 
   <div id="log"></div>
@@ -120,6 +131,22 @@
 let sinceTs = 0;
 const logEl = document.getElementById('log');
 const errEl = document.getElementById('error');
+let errTimer = null;
+
+function showError(message) {
+  errEl.textContent = message;
+  errEl.hidden = false;
+  clearTimeout(errTimer);
+  errTimer = setTimeout(clearError, 30000);  // long enough to read on a phone
+}
+
+function clearError() {
+  errEl.hidden = true;
+  errEl.textContent = '';
+}
+errEl.addEventListener('click', clearError);
+
+const LANGUAGE_LABELS = { en: 'English', de: 'German', it: 'Italian' };
 
 // The Pi's clock may be wrong (no battery-backed RTC, no NTP in AP mode).
 // clockOffsetSeconds shifts every displayed timestamp to line up with this
@@ -127,6 +154,7 @@ const errEl = document.getElementById('error');
 // self-corrects if the Pi's clock later gets fixed (e.g. it regains
 // internet and syncs via NTP) mid-session.
 let clockOffsetSeconds = 0;
+let knockOverride = null;  // last-seen server value; the button toggles it
 
 function fmtTs(ts) {
   return new Date((ts + clockOffsetSeconds) * 1000).toLocaleTimeString();
@@ -183,7 +211,7 @@ function renderVoiceCategories(available, enabled) {
   }
 }
 
-async function pollStatus() {
+async function pollStatus(force = false) {
   try {
     const res = await fetch('/api/status');
     if (!res.ok) return;
@@ -204,11 +232,34 @@ async function pollStatus() {
       : 'n/a';
     document.getElementById('temp-card').classList.toggle('warning', !!s.cpu_temp_warning);
     document.getElementById('s-knock-loop').textContent = s.knock_loop_enabled ? 'on (looping)' : 'off';
+    const rs = s.reply_sounds;  // dedicated sounds played when a keyword is heard
+    document.getElementById('s-reply').textContent = !rs ? '-'
+      : rs.clips ? `${rs.category}: ${rs.clips} file${rs.clips === 1 ? '' : 's'}`
+      : rs.placeholder ? `stand-in: ${rs.placeholder} (no ${rs.category} files yet)`
+      : `no sounds available!`;
+    knockOverride = s.knock_probability_override;
+    document.getElementById('s-knock-chance').textContent =
+      `${Math.round(s.knock_probability * 100)}%` +
+      (s.knock_loop_enabled ? ' (knocking mode)' : knockOverride !== null ? ' (forced)' : '');
+    const knockBtn = document.getElementById('knock-always');
+    knockBtn.classList.toggle('active', knockOverride !== null);
+    knockBtn.textContent = knockOverride === null ? 'Knock on every response'
+      : knockOverride === 1 ? 'Knock on every response: ON (click to undo)'
+      : `Knock chance forced to ${Math.round(knockOverride * 100)}% (click to undo)`;
     document.getElementById('s-network').textContent = s.ap_mode_enabled
       ? `AP mode ("${s.ap_mode_ssid}")` : 'client WiFi';
 
-    const active = document.activeElement && document.activeElement.id;
-    if (active !== 'language') document.getElementById('language').value = s.language;
+    // Skip a control while the user is mid-interaction with it (e.g. dragging a
+    // slider) — unless `force`: right after a request finished, the control must
+    // show what the server actually did, even if it still has focus.
+    const active = force ? null : document.activeElement && document.activeElement.id;
+    const languageEl = document.getElementById('language');
+    for (const opt of languageEl.options) {
+      const installed = !s.languages || s.languages[opt.value] !== false;
+      opt.disabled = !installed && opt.value !== s.language;
+      opt.textContent = LANGUAGE_LABELS[opt.value] + (installed ? '' : ' (not installed)');
+    }
+    if (active !== 'language') languageEl.value = s.language;
     if (active !== 'mode') document.getElementById('mode').value = s.mode;
     if (active !== 'voice-volume') document.getElementById('voice-volume').value = s.voice_volume;
     if (active !== 'knock-volume') document.getElementById('knock-volume').value = s.knock_volume;
@@ -244,7 +295,7 @@ async function pollLog() {
 }
 
 async function postJson(url, body) {
-  errEl.textContent = '';
+  clearError();
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -253,10 +304,12 @@ async function postJson(url, body) {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      errEl.textContent = data.error || `request failed (${res.status})`;
+      showError(data.error || `request failed (${res.status})`);
     }
   } catch (e) {
-    errEl.textContent = 'request failed: server unreachable';
+    showError('request failed: server unreachable');
+  } finally {
+    pollStatus(true);  // show the server's real state now (also reverts a rejected choice)
   }
 }
 
@@ -270,10 +323,20 @@ document.getElementById('cooldown').addEventListener('input', e => {
 });
 document.getElementById('cooldown').addEventListener('change', e => postJson('/api/cooldown', { cooldown_seconds: parseFloat(e.target.value) }));
 document.getElementById('trigger').addEventListener('click', () => postJson('/api/trigger', {}));
+document.getElementById('knock-always').addEventListener('click', () =>
+  postJson('/api/knock-probability', { probability: knockOverride === null ? 1 : null }));
+document.getElementById('reset').addEventListener('click', () => {
+  if (!confirm("Reset language, mode, volumes, cooldown, knocking and voice sounds to config.yaml's defaults?")) return;
+  // Sliders/selects skip syncing while focused (so a drag isn't overwritten);
+  // some browsers (Safari) don't focus a button on click, so release focus
+  // explicitly or a just-touched slider would keep showing its old value.
+  if (document.activeElement) document.activeElement.blur();
+  postJson('/api/reset-settings', {});
+});
 
 pollStatus();
 pollLog();
-setInterval(pollStatus, 2000);
+setInterval(() => pollStatus(), 2000);
 setInterval(pollLog, 1500);
 </script>
 </body>

@@ -1,5 +1,8 @@
 """Web dashboard: status/log monitoring + live mode/language/volume control.
 
+Every setting changed here is also saved via state.persist_settings(), so it
+survives a restart (see settings_store.py).
+
 Meant to be reached from another device on the same WLAN as the Pi (e.g.
 http://<pi-ip>:8080). No authentication — this is a local-network training
 tool, not something to expose to the internet; see README for notes if you
@@ -12,7 +15,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
-from .config import MODEL_NAMES, MODELS_DIR
+from .config import BEHAVIOR_MODES, MODEL_NAMES, download_hint, language_installed
 from .state import SharedState
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -44,10 +47,11 @@ def create_app(state: SharedState) -> Flask:
     def set_mode():
         data = request.get_json(silent=True) or {}
         mode = data.get("mode")
-        if mode not in ("responsive", "distress", "weak"):
-            return jsonify({"error": "mode must be one of: responsive, distress, weak"}), 400
+        if mode not in BEHAVIOR_MODES:
+            return jsonify({"error": f"mode must be one of: {', '.join(BEHAVIOR_MODES)}"}), 400
         with state.lock:
             state.config.behavior.mode = mode
+        state.persist_settings()
         state.add_log("system", f"mode changed to '{mode}' via web dashboard")
         return jsonify(state.status())
 
@@ -57,15 +61,24 @@ def create_app(state: SharedState) -> Flask:
         language = data.get("language")
         if language not in MODEL_NAMES:
             return jsonify({"error": f"language must be one of: {list(MODEL_NAMES)}"}), 400
-        model_path = MODELS_DIR / MODEL_NAMES[language]
-        if not model_path.exists():
-            return jsonify(
-                {"error": f"Vosk model for '{language}' not downloaded on this device"}
-            ), 400
+        if not language_installed(language):
+            # Loud on purpose: the model is gitignored, so it is missing on any
+            # device that only ran `git pull` — silently ignoring the choice
+            # looks exactly like "selecting the language does nothing".
+            hint = download_hint(language)
+            state.add_log(
+                "system",
+                f"language change to '{language}' refused: its Vosk model isn't installed on this device (run: {hint})",
+            )
+            return jsonify({
+                "error": f"The '{language}' language model isn't installed on this device, so the "
+                f"language was NOT changed. On the Pi (needs internet, e.g. Ethernet) run: {hint}"
+            }), 400
         with state.lock:
             state.language = language
             state.config.language = language
             state.reload_event.set()
+        state.persist_settings()
         state.add_log("system", f"language changed to '{language}' via web dashboard, reloading listener")
         return jsonify(state.status())
 
@@ -89,6 +102,7 @@ def create_app(state: SharedState) -> Flask:
                 except (TypeError, ValueError):
                     return jsonify({"error": "'knock' must be a number between 0 and 1"}), 400
 
+        state.persist_settings()
         state.add_log(
             "system",
             f"volume set to voice={state.config.volume.voice:.2f} "
@@ -106,9 +120,42 @@ def create_app(state: SharedState) -> Flask:
             return jsonify({"error": "'enabled' must be true or false"}), 400
         with state.lock:
             state.config.knock.loop_enabled = enabled
+        state.persist_settings()
         state.add_log(
             "system",
             f"knocking mode {'enabled' if enabled else 'disabled'} via web dashboard",
+        )
+        return jsonify(state.status())
+
+    @app.post("/api/knock-probability")
+    def set_knock_probability():
+        """Body: {"probability": 0.0-1.0} forces the chance a response includes
+        a knock (the dashboard's button sends 1); {"probability": null} clears
+        the override, back to the configured per-mode values."""
+        data = request.get_json(silent=True) or {}
+        if "probability" not in data:
+            return jsonify({"error": "provide 'probability' (a number 0-1, or null to clear)"}), 400
+        value = data["probability"]
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                return jsonify({"error": "'probability' must be a number between 0 and 1, or null"}), 400
+            value = float(value)
+        with state.lock:
+            state.config.knock.probability_override = value
+        state.persist_settings()
+        state.add_log(
+            "system",
+            "knock chance override cleared (back to configured values) via web dashboard"
+            if value is None
+            else f"knock chance forced to {value:.0%} via web dashboard",
+        )
+        return jsonify(state.status())
+
+    @app.post("/api/reset-settings")
+    def reset_settings():
+        applied = state.reset_settings()
+        state.add_log(
+            "system", f"all dashboard settings reset to config.yaml defaults ({len(applied)} settings)"
         )
         return jsonify(state.status())
 
@@ -125,6 +172,7 @@ def create_app(state: SharedState) -> Flask:
             return jsonify({"error": "'cooldown_seconds' must be between 0 and 300"}), 400
         with state.lock:
             state.config.trigger.cooldown_seconds = cooldown
+        state.persist_settings()
         state.add_log("system", f"cooldown set to {cooldown:.0f}s via web dashboard")
         return jsonify(state.status())
 
@@ -150,6 +198,7 @@ def create_app(state: SharedState) -> Flask:
 
         with state.lock:
             state.config.trigger.enabled_categories = deduped
+        state.persist_settings()
         state.add_log(
             "system", f"voice categories set to {deduped} via web dashboard"
         )

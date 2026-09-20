@@ -17,6 +17,7 @@ import numpy as np
 import soundfile as sf
 
 from victimsim import audio_hal
+from victimsim import settings_store
 from victimsim import listener as listener_module
 from victimsim import state as state_module
 from victimsim.config import Config, MODELS_DIR, MODEL_NAMES, SpontaneousProfile
@@ -331,6 +332,8 @@ def main():
         assert status_resp.status_code == 200
         status_data = status_resp.get_json()
         assert status_data["ap_mode_enabled"] is False
+        # the fast test bank has no reply/ folder -> the cry stand-in is in use
+        assert status_data["reply_sounds"] == {"category": "reply", "clips": 0, "placeholder": "cry"}, status_data["reply_sounds"]
         assert abs(status_data["server_time"] - time.time()) < 5, (
             "server_time should be close to wall-clock time on this machine"
         )
@@ -385,6 +388,153 @@ def main():
         config.language = "en"
 
     check("web dashboard: routes, validation, and live state updates", _web_dashboard)
+
+    def _keyword_is_never_answered_with_silence():
+        # Against the repo's real assets: either real files are in
+        # assets/sounds/reply/ or the cry stand-in is available. (Deliberately
+        # true both before and after real reply recordings get added.)
+        info = Responder(config, real_bank, None).reply_info()
+        assert info["clips"] > 0 or info["placeholder"] is not None, info
+
+        # ...and a keyword hit through the real Responder plays it.
+        state = SharedState(config)
+        responder = Responder(config, bank, None, state=state)  # fast bank: no reply/ -> stand-in
+        responder.respond("heard 'hallo' (smoke test)", reply=True)
+        assert "stand-in" in state.last_response["category"], state.last_response
+
+    check("a keyword hit is always answered (dedicated reply sounds, else the cry stand-in)",
+          _keyword_is_never_answered_with_silence)
+
+    def _uninstalled_language_is_refused_loudly():
+        # A device that ran `git pull` but never downloaded a model (they're
+        # gitignored). Choosing that language must fail visibly, log why, and
+        # leave the running language alone — never look like it "did nothing".
+        import victimsim.config as config_module
+
+        models = Path(tempfile.mkdtemp())
+        (models / MODEL_NAMES["de"]).mkdir()
+        original = config_module.MODELS_DIR
+        try:
+            config_module.MODELS_DIR = models
+            state = SharedState(Config.load())
+            client = create_app(state).test_client()
+
+            assert client.get("/api/status").get_json()["languages"] == {"en": False, "de": True, "it": False}
+
+            resp = client.post("/api/language", json={"language": "it"})
+            assert resp.status_code == 400
+            error = resp.get_json()["error"]
+            assert "NOT changed" in error and "download_vosk_model.sh it" in error, error
+            assert state.language == "de" and state.config.language == "de"
+            assert not state.reload_event.is_set(), "must not tear down the working listener"
+            assert any("refused" in e.message and "'it'" in e.message for e in state.snapshot_log())
+
+            assert client.post("/api/language", json={"language": "de"}).status_code == 200
+        finally:
+            config_module.MODELS_DIR = original
+
+    check("choosing a language whose model isn't installed is refused with a fix, logged, and harmless",
+          _uninstalled_language_is_refused_loudly)
+
+    def _settings_persist_across_restart():
+        # Every change made through the dashboard must survive a restart.
+        # A throwaway settings file keeps this away from the real one.
+        settings_path = Path(tempfile.mkdtemp()) / "runtime_settings.json"
+        state = SharedState(Config.load())
+        state.settings_path = settings_path
+        client = create_app(state).test_client()
+
+        assert client.post("/api/mode", json={"mode": "weak"}).status_code == 200
+        assert client.post("/api/language", json={"language": "it"}).status_code == 200
+        assert client.post("/api/volume", json={"voice": 0.3, "knock": 0.6}).status_code == 200
+        assert client.post("/api/knock-loop", json={"enabled": True}).status_code == 200
+        assert client.post("/api/knock-probability", json={"probability": 1}).status_code == 200
+        assert client.post("/api/cooldown", json={"cooldown_seconds": 11}).status_code == 200
+        assert client.post("/api/voice-categories", json={"enabled_categories": ["cry"]}).status_code == 200
+
+        # A rejected request must not clobber what was saved.
+        assert client.post("/api/mode", json={"mode": "bogus"}).status_code == 400
+        assert json.loads(settings_path.read_text())["mode"] == "weak"
+
+        # "Restart": a brand-new Config from config.yaml + the saved file.
+        fresh = Config.load()
+        assert fresh.behavior.mode == "responsive" and fresh.trigger.cooldown_seconds == 5.0
+        applied = settings_store.apply(fresh, settings_store.load(settings_path))
+        assert len(applied) == 8, applied
+        assert fresh.behavior.mode == "weak"
+        assert fresh.language == "it"
+        assert (fresh.volume.voice, fresh.volume.knock) == (0.3, 0.6)
+        assert fresh.knock.loop_enabled is True
+        assert fresh.knock.probability_override == 1.0
+        assert fresh.trigger.cooldown_seconds == 11
+        assert fresh.trigger.enabled_categories == ["cry"]
+
+    check("dashboard changes are saved and restored after a restart", _settings_persist_across_restart)
+
+    def _knock_probability_button():
+        state = SharedState(Config.load())
+        client = create_app(state).test_client()
+        responder = Responder(state.config, bank, None, state=state)
+
+        for bad in ({}, {"probability": 2}, {"probability": -1}, {"probability": "1"}, {"probability": True}):
+            assert client.post("/api/knock-probability", json=bad).status_code == 400, bad
+
+        # Effective in every mode (each has its own configured chance), and
+        # clearing it restores that mode's configured value untouched.
+        for mode in ("responsive", "distress", "weak"):
+            client.post("/api/mode", json={"mode": mode})
+            configured = client.get("/api/status").get_json()["knock_probability"]
+            forced = client.post("/api/knock-probability", json={"probability": 1}).get_json()
+            assert forced["knock_probability"] == 1.0 and forced["knock_probability_override"] == 1.0
+            assert responder._strength_params()[1] == 1.0, "the responder must use the forced chance"
+            cleared = client.post("/api/knock-probability", json={"probability": None}).get_json()
+            assert cleared["knock_probability_override"] is None
+            assert cleared["knock_probability"] == configured, mode
+
+    check("knock-on-every-response button forces 100% in every mode and undoes cleanly", _knock_probability_button)
+
+    def _reset_to_defaults():
+        settings_path = Path(tempfile.mkdtemp()) / "runtime_settings.json"
+        state = SharedState(Config.load())  # defaults = config.yaml as loaded
+        state.settings_path = settings_path
+        defaults = dict(state.defaults)
+        client = create_app(state).test_client()
+
+        for url, body in (
+            ("/api/mode", {"mode": "weak"}),
+            ("/api/language", {"language": "it"}),  # config.yaml default is "de"
+            ("/api/volume", {"voice": 0.1, "knock": 0.2}),
+            ("/api/knock-loop", {"enabled": True}),
+            ("/api/knock-probability", {"probability": 1}),
+            ("/api/cooldown", {"cooldown_seconds": 9}),
+            ("/api/voice-categories", {"enabled_categories": ["cry"]}),
+        ):
+            assert client.post(url, json=body).status_code == 200, url
+        assert settings_path.exists()
+        assert settings_store.snapshot(state.config) != defaults
+        state.reload_event.clear()
+
+        resp = client.post("/api/reset-settings", json={})
+        assert resp.status_code == 200
+        assert settings_store.snapshot(state.config) == defaults, "every setting back to config.yaml's value"
+        assert state.language == state.config.language == defaults["language"]
+        assert state.reload_event.is_set(), "language changed back, so the listener must reload"
+        assert not settings_path.exists(), "the saved copy must go too, or a restart would bring the old values back"
+        status = resp.get_json()
+        assert status["mode"] == "responsive" and status["knock_probability_override"] is None
+        assert client.post("/api/reset-settings", json={}).status_code == 200  # nothing saved: still fine
+
+    check("reset to defaults restores config.yaml's values and forgets the saved copy", _reset_to_defaults)
+
+    def _unwritable_settings_path_does_not_break_the_dashboard():
+        state = SharedState(Config.load())
+        state.settings_path = Path("/proc/nonexistent/settings.json")  # can't be created
+        client = create_app(state).test_client()
+        assert client.post("/api/cooldown", json={"cooldown_seconds": 9}).status_code == 200
+        assert state.config.trigger.cooldown_seconds == 9  # applied live regardless
+        assert any("could not save settings" in e.message for e in state.snapshot_log())
+
+    check("a save failure is logged, not fatal", _unwritable_settings_path_does_not_break_the_dashboard)
 
     print("\nAll smoke checks passed.")
 

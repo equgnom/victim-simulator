@@ -13,6 +13,15 @@ class SoundBank:
         self.sounds_dir = sounds_dir
         self._last_pick: dict[str, Path] = {}
 
+    def count(self, category: str) -> int:
+        """How many .wav clips `category` has — 0 (not an error) if the folder is
+        empty or doesn't exist. Looked up live, so files dropped in while the
+        simulator is running are picked up without a restart."""
+        return len(list((self.sounds_dir / category).glob("*.wav")))
+
+    def has_clips(self, category: str) -> bool:
+        return self.count(category) > 0
+
     def clips_in(self, category: str) -> list[Path]:
         folder = self.sounds_dir / category
         clips = sorted(folder.glob("*.wav"))

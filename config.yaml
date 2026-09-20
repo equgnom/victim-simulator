@@ -46,6 +46,13 @@ trigger:
     - shout
     - cry
     - moan
+  # A keyword hit is answered with sounds from assets/sounds/<reply_category>/
+  # (dedicated recordings, independent of shout/cry/moan above — those are for
+  # spontaneous calls). While that folder has no .wav files, the clips of
+  # reply_fallback_category stand in, so a keyword is never answered with
+  # silence; add real files there and they take over on their own.
+  reply_category: reply
+  reply_fallback_category: cry
   # Which of the above are currently eligible to be picked — toggle live
   # from the dashboard's checkboxes (checked = included, unchecked =
   # excluded from every mode's random pick). Defaults to all of
@@ -58,8 +65,10 @@ trigger:
 #                simulating a victim actively shouting and knocking for help
 #   weak       - additionally calls out on its own, but rarely and at reduced
 #                volume/intensity, simulating an exhausted/weak victim
-# In "distress" and "weak" modes, the profile below also governs the strength
-# of keyword-triggered responses (a weak victim still sounds weak when spoken to).
+# In "distress" and "weak" modes, the profile below also governs the volume and
+# knock chance of keyword replies (a weak victim still sounds weak when spoken
+# to) — though not which sound plays: replies use the dedicated reply sounds
+# (trigger.reply_category), the profile's response_categories are for its own calls.
 behavior:
   mode: responsive
   profiles:

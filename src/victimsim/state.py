@@ -13,7 +13,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config
+from . import settings_store
+from .config import Config, installed_languages
 
 CPU_TEMP_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
 
@@ -55,10 +56,45 @@ class SharedState:
         self._cpu_temp_warning_active = False
 
         self.responder = None  # set by main.py once the Responder is constructed
+        # Where dashboard changes get saved so they survive restarts; None
+        # (the default, e.g. in tests) means don't persist anything.
+        self.settings_path: Path | None = None
+        # config.yaml's values for the dashboard-adjustable settings, i.e.
+        # what "Reset to defaults" goes back to. main.py overwrites this with
+        # a snapshot taken *before* saved settings are layered on top.
+        self.defaults: dict = settings_store.snapshot(config)
 
     def add_log(self, kind: str, message: str) -> None:
         with self.lock:
             self.log.append(LogEntry(time.time(), kind, message))
+
+    def persist_settings(self) -> None:
+        """Saves the dashboard-adjustable settings so they survive a restart.
+        Never raises — a full disk or read-only filesystem shouldn't break
+        the dashboard request that triggered it, just get logged."""
+        if self.settings_path is None:
+            return
+        with self.lock:
+            try:
+                settings_store.save(self.settings_path, settings_store.snapshot(self.config))
+            except OSError as e:
+                self.add_log("system", f"could not save settings to {self.settings_path}: {e}")
+
+    def reset_settings(self) -> list[str]:
+        """Back to config.yaml's values for every dashboard-adjustable setting,
+        and forget the saved copy so a restart doesn't bring the old ones back.
+        Returns which settings were applied."""
+        with self.lock:
+            applied = settings_store.apply(self.config, self.defaults)
+            if self.config.language != self.language:
+                self.language = self.config.language
+                self.reload_event.set()  # audio loop rebuilds the listener
+            if self.settings_path is not None:
+                try:
+                    settings_store.clear(self.settings_path)
+                except OSError as e:
+                    self.add_log("system", f"could not delete saved settings {self.settings_path}: {e}")
+            return applied
 
     def snapshot_log(self, since: float = 0.0) -> list[LogEntry]:
         with self.lock:
@@ -107,11 +143,15 @@ class SharedState:
                 # it doesn't change the Pi's actual system clock.
                 "server_time": time.time(),
                 "language": self.language,
+                "languages": installed_languages(),  # {code: model installed on this device?}
                 "mode": self.config.behavior.mode,
                 "voice_volume": self.config.volume.voice,
                 "knock_volume": self.config.volume.knock,
                 "knock_loop_enabled": self.config.knock.loop_enabled,
                 "cooldown_seconds": self.config.trigger.cooldown_seconds,
+                "reply_sounds": self.responder.reply_info() if self.responder is not None else None,
+                "knock_probability": self.config.effective_knock_probability(),
+                "knock_probability_override": self.config.knock.probability_override,
                 "uptime_seconds": round(time.time() - self.started_at, 1),
                 "listener_ready": self.listener_ready,
                 "input_device": self.input_device,

@@ -12,9 +12,10 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+from pathlib import Path
 
-from . import audio_hal
-from .config import Config, DEFAULT_CONFIG_PATH, MODELS_DIR, MODEL_NAMES
+from . import audio_hal, settings_store
+from .config import Config, DEFAULT_CONFIG_PATH, MODELS_DIR, MODEL_NAMES, download_hint
 from .listener import KeywordListener
 from .responder import Responder
 from .sound_bank import SoundBank
@@ -29,6 +30,7 @@ MODEL_MISSING_RETRY_SECONDS = 5
 def audio_loop(state: SharedState, input_device, output_device) -> None:
     """Owns the listener lifecycle. Rebuilds the listener whenever
     `state.reload_event` is set (language switched from the web dashboard)."""
+    warned_missing: set[str] = set()  # log a missing model once, not every retry
     while not state.stop_event.is_set():
         state.reload_event.clear()
         language = state.language
@@ -36,10 +38,18 @@ def audio_loop(state: SharedState, input_device, output_device) -> None:
 
         if not model_path.exists():
             state.listener_ready = False
-            state.add_log("system", f"Vosk model for '{language}' not found at {model_path}")
+            if language not in warned_missing:
+                warned_missing.add(language)
+                message = (
+                    f"NOT LISTENING: Vosk model for '{language}' not found at {model_path} "
+                    f"(run: {download_hint(language)}, or pick another language)"
+                )
+                print(message)
+                state.add_log("system", message)
             if state.stop_event.wait(MODEL_MISSING_RETRY_SECONDS):
                 return
             continue
+        warned_missing.discard(language)
 
         keywords = state.config.trigger.keywords_for(language)
         listener = KeywordListener(
@@ -63,7 +73,7 @@ def audio_loop(state: SharedState, input_device, output_device) -> None:
             state.note_heard(keyword, text)
             state.add_log("heard", f"heard '{text}' (matched '{keyword}')")
             if state.responder.ready():
-                state.responder.respond(f"heard '{text}' (matched '{keyword}')")
+                state.responder.respond(f"heard '{text}' (matched '{keyword}')", reply=True)
             else:
                 state.add_log("cooldown", f"heard '{text}' but still cooling down, ignored")
 
@@ -75,6 +85,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Responsive Victim Simulator")
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
+    parser.add_argument(
+        "--settings-file",
+        default=str(settings_store.DEFAULT_SETTINGS_PATH),
+        help="Where dashboard changes are saved so they survive restarts "
+        "(default: runtime_settings.json in the repo root; delete it to go back to config.yaml's values)",
+    )
     parser.add_argument("--no-web", action="store_true", help="Disable the web dashboard (CLI-only)")
     parser.add_argument("--host", default=None, help="Web dashboard bind host (default: config.yaml web.host)")
     parser.add_argument("--port", type=int, default=None, help="Web dashboard port (default: config.yaml web.port)")
@@ -85,21 +101,49 @@ def main() -> None:
         return
 
     config = Config.load(args.config)
+    settings_path = Path(args.settings_file)
+    defaults = settings_store.snapshot(config)  # config.yaml's values, for "Reset to defaults"
+    saved = settings_store.load(settings_path)
+    restored = settings_store.apply(config, saved)
+    ignored = [k for k in settings_store.snapshot(config) if k in saved and k not in restored]
     input_device = audio_hal.resolve_device(config.audio.input_device, "input")
     output_device = audio_hal.resolve_device(config.audio.output_device, "output")
 
     state = SharedState(config)
     state.input_device = input_device
     state.output_device = output_device
+    state.settings_path = settings_path
+    state.defaults = defaults
+    if restored:
+        note = f"restored saved dashboard settings from {settings_path.name}: {', '.join(restored)}"
+        print(note)
+        state.add_log("system", note)
+    if ignored:
+        note = (
+            f"ignored saved setting(s) that are invalid or unavailable on this device: {', '.join(ignored)}"
+            + (f" (missing language model? run: {download_hint(str(saved.get('language')))})" if "language" in ignored else "")
+        )
+        print(note)
+        state.add_log("system", note)
 
     sound_bank = SoundBank()
-    preloaded = audio_hal.preload_all_clips(
-        sound_bank, [*config.trigger.response_categories, "knock"], config.audio.playback_sample_rate
-    )
+    to_preload = [*config.trigger.response_categories, "knock"]
+    for extra in (config.trigger.reply_category, config.trigger.reply_fallback_category):
+        if extra not in to_preload and sound_bank.has_clips(extra):
+            to_preload.append(extra)
+    preloaded = audio_hal.preload_all_clips(sound_bank, to_preload, config.audio.playback_sample_rate)
     print(f"Preloaded {preloaded} sound clips into memory (no disk I/O on the response path).")
 
     responder = Responder(config, sound_bank, output_device, state=state)
     state.responder = responder
+    reply = responder.reply_info()
+    if reply["clips"]:
+        print(f"Keyword replies: {reply['clips']} clip(s) in assets/sounds/{reply['category']}/.")
+    else:
+        print(
+            f"Keyword replies: assets/sounds/{reply['category']}/ has no clips yet — "
+            f"using '{reply['placeholder']}' as a stand-in until you add some."
+        )
 
     spontaneous_loop = SpontaneousLoop(state, responder)
     spontaneous_loop.start()
