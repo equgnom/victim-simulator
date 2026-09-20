@@ -7,6 +7,10 @@ substrings change between the two.
 
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -16,6 +20,10 @@ CHANNEL_INDEX = {"left": 0, "right": 1}
 
 def list_devices() -> str:
     return str(sd.query_devices())
+
+
+class DeviceNotFoundError(RuntimeError):
+    """A configured audio device isn't present (unplugged, not enumerated yet)."""
 
 
 def resolve_device(name_substring: str | None, kind: str) -> int | None:
@@ -31,7 +39,7 @@ def resolve_device(name_substring: str | None, kind: str) -> int | None:
     for idx, dev in enumerate(devices):
         if name_substring.lower() in dev["name"].lower() and dev[channel_key] > 0:
             return idx
-    raise RuntimeError(
+    raise DeviceNotFoundError(
         f"No {kind} device matching '{name_substring}' found. "
         f"Run `python -m victimsim.main --list-devices` to see available devices."
     )
@@ -69,18 +77,39 @@ def load_clip(path, target_sr: int) -> np.ndarray:
     return data
 
 
-def preload_all_clips(sound_bank, categories, target_sr: int) -> int:
+@dataclass
+class PreloadReport:
+    loaded: int = 0
+    empty: list[str] = field(default_factory=list)  # categories with no .wav files
+    unreadable: list[tuple[Path, str]] = field(default_factory=list)  # (clip, why) that failed to load
+
+
+def preload_all_clips(sound_bank, categories, target_sr: int) -> PreloadReport:
     """Warms the clip cache for every clip in `categories` (all voice
     categories plus "knock"), so even the *first* response of a session
     doesn't pay disk I/O + resample latency — that already only happens
     once per clip thanks to load_clip's cache, this just moves it to
-    startup instead of mid-response. Returns how many clips were loaded."""
-    count = 0
+    startup instead of mid-response.
+
+    Never raises for bad *content*: a category with no clips, or a corrupt
+    file, used to abort this (and with it the whole app at startup — under
+    systemd a crash loop with the dashboard down). They're recorded in the
+    returned report for the caller to warn about, and skipped; using such a
+    category later fails at that moment instead, where it's guarded and logged.
+    """
+    report = PreloadReport()
     for category in categories:
+        if not sound_bank.has_clips(category):
+            report.empty.append(category)
+            continue
         for clip_path in sound_bank.clips_in(category):
-            load_clip(clip_path, target_sr)
-            count += 1
-    return count
+            try:
+                load_clip(clip_path, target_sr)
+            except Exception as e:  # noqa: BLE001 — soundfile raises assorted errors for bad files
+                report.unreadable.append((clip_path, f"{type(e).__name__}: {e}"))
+            else:
+                report.loaded += 1
+    return report
 
 
 def loop_clip(clip: np.ndarray, count: int, gap_seconds: float, samplerate: int) -> np.ndarray:
@@ -121,6 +150,77 @@ def mix_to_stereo(
     return stereo
 
 
+# PortAudio can't be re-initialized while a stream is playing, so playback and
+# refresh_devices() take turns.
+audio_lock = threading.Lock()
+
+
+def refresh_devices(after=None) -> None:
+    """Re-scan the audio devices.
+
+    PortAudio only enumerates devices when it initializes, so a USB mic that was
+    unplugged and replugged is invisible — or sits at a different index — until it
+    is re-initialized; retrying to open the old device would never succeed.
+    (sounddevice has no public API for this; `_terminate`/`_initialize` are what
+    its own FAQ recommends. Must not be called while an input stream is open —
+    the listener has closed its stream by the time it gets here.) Waits for any
+    playback in progress to finish first. `after`, if given, runs while the lock is
+    still held — no playback can start between the re-scan and re-resolving indices.
+    """
+    with audio_lock:
+        sd._terminate()
+        sd._initialize()
+        if after is not None:
+            after()
+
+
+# A clip may take this much longer than its own length to finish before playback
+# counts as stalled. Generous on purpose: this only has to catch a device that
+# never finishes, and must never cut off a slow-but-fine playback.
+PLAYBACK_GRACE_SECONDS = 3.0
+# After aborting a stalled stream, how long to wait for the waiter to notice.
+ABORT_WAIT_SECONDS = 2.0
+
+
+class PlaybackError(RuntimeError):
+    """Audio output failed to start or stalled. The caller should log it and carry
+    on — it must not freeze or crash the simulator."""
+
+
 def play_blocking(stereo: np.ndarray, samplerate: int, device: int | None) -> None:
-    sd.play(stereo, samplerate=samplerate, device=device, latency="low")
-    sd.wait()
+    """Plays `stereo` and returns when it has finished — but never waits forever.
+
+    sd.wait() has no timeout: if the output device ever stalls (unplugged mid-
+    playback, a wedged driver), it blocks for good, the responder never returns,
+    the microphone stays muted for the rest of the run, and the process still
+    looks alive to systemd so nothing restarts it. So the wait is bounded by the
+    clip's own length plus PLAYBACK_GRACE_SECONDS; past that the stream is aborted
+    and PlaybackError raised.
+    """
+    with audio_lock:
+        _play_bounded(stereo, samplerate, device)
+
+
+def _play_bounded(stereo: np.ndarray, samplerate: int, device: int | None) -> None:
+    try:
+        sd.play(stereo, samplerate=samplerate, device=device, latency="low")
+    except sd.PortAudioError as e:
+        raise PlaybackError(f"could not start audio playback: {e}") from e
+
+    duration = len(stereo) / samplerate
+    limit = duration + PLAYBACK_GRACE_SECONDS
+    waiter = threading.Thread(target=sd.wait, name="playback-wait", daemon=True)
+    waiter.start()
+    waiter.join(limit)
+    if waiter.is_alive():
+        try:
+            # abort(), not stop(): stop() drains pending buffers, which is exactly
+            # what a wedged device can't do.
+            sd.get_stream().abort(ignore_errors=True)
+        except Exception:  # noqa: BLE001 — best effort; the error below is what matters
+            pass
+        waiter.join(ABORT_WAIT_SECONDS)  # a daemon thread: if it's still stuck it can't block exit
+        raise PlaybackError(
+            f"audio playback stalled: a {duration:.1f}s clip hadn't finished after {limit:.0f}s "
+            f"(output device stuck?) — stream aborted"
+        )

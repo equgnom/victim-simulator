@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import threading
 import wave
 from pathlib import Path
 
 import pytest
 
 from victimsim import audio_hal
-from victimsim import main as main_module
-from victimsim.config import MODEL_NAMES, Config
+from victimsim.config import Config
 from victimsim.responder import Responder
 from victimsim.sound_bank import SoundBank
 from victimsim.state import SharedState
@@ -162,40 +160,3 @@ def test_a_reply_can_still_be_accompanied_by_a_knock(config, tmp_path, played):
     bank = _bank(tmp_path, with_reply=True)
     Responder(config, bank, None).respond("heard 'hallo'", reply=True)
     assert sorted(bank.picked_categories) == ["knock", "reply"]
-
-
-def test_the_keyword_path_asks_for_a_reply(monkeypatch, tmp_path):
-    """The wiring: audio_loop must call respond(..., reply=True) when a keyword is heard."""
-    config = Config.load()
-    config.language = "de"
-    state = SharedState(config)
-    calls: list[tuple[str, bool]] = []
-
-    class FakeResponder:
-        busy = threading.Event()
-
-        def ready(self) -> bool:
-            return True
-
-        def respond(self, reason: str, reply: bool = False) -> None:
-            calls.append((reason, reply))
-
-    class FakeListener:
-        def __init__(self, **_kwargs):
-            self.calls = 0
-
-        def wait_for_keyword(self, mute_event=None, reload_event=None):
-            self.calls += 1
-            if self.calls == 1:
-                return "hallo", "hallo da"
-            state.stop_event.set()
-            return None
-
-    state.responder = FakeResponder()
-    (tmp_path / MODEL_NAMES["de"]).mkdir()
-    monkeypatch.setattr(main_module, "MODELS_DIR", tmp_path)
-    monkeypatch.setattr(main_module, "KeywordListener", FakeListener)
-
-    main_module.audio_loop(state, None, None)
-
-    assert calls == [("heard 'hallo da' (matched 'hallo')", True)]

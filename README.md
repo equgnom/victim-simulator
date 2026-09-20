@@ -336,6 +336,106 @@ change is the one that actually matters most, but it isn't independently
 measurable without a live mic and a real spoken phrase; it needs to be
 judged by ear on the actual hardware.
 
+## Audio failures: microphone
+
+The ReSpeaker Lite is known to drop off USB. Before, that could end listening
+without any sign of it — the dashboard kept saying "listening". Now the
+microphone side never dies quietly:
+
+- **Missing at startup** — the app still starts, so the dashboard is
+  reachable to see what's wrong (previously the service crash-looped and took
+  the dashboard down with it). The Listener card turns red and says why:
+  `not ready: No input device matching 'ReSpeaker' found ...`, and the log gets
+  `MICROPHONE UNAVAILABLE: ...`.
+- **Unplugged mid-session, or stalled** — a stream that ends by itself is
+  noticed immediately; a mic that just goes quiet with no error is caught after
+  5 s without audio (`STALL_TIMEOUT_SECONDS` in `listener.py`). Audio is read
+  through a callback into a bounded queue rather than blocking `stream.read()`
+  calls, precisely because a blocking read has no timeout.
+- **Recovery** — retried with backoff (1 s, doubling to a 10 s cap, reset once
+  it works again). Every retry first **re-scans the audio devices**: PortAudio
+  only sees USB devices that were present when it initialized, so a replugged
+  ReSpeaker stays invisible (or moves to a different index) until it's
+  re-initialized. The output device index is re-resolved after the re-scan too.
+  When audio flows again the log says `microphone is back after Ns` and the
+  card goes green — "listening" now means audio is actually arriving, not just
+  that a stream opened.
+- The same problem repeated is logged once, not every retry (a *changed*
+  reason is logged again); switching language or shutting down interrupts a
+  backoff immediately; a bug in the listener is reported (`unexpected
+  ValueError: ...`) and retried rather than ending the thread; and a failing
+  *response* (say, an emptied sound folder) is logged without stopping the
+  listener.
+
+## Audio failures: spontaneous calls
+
+In `distress`/`weak` mode a background thread makes the victim call out on a
+timer. An exception there — typically a sound folder with no files, or a
+non-numeric interval typed into `config.yaml` — used to end that thread
+silently: the traceback only reached the console, so the service looked
+healthy while the victim never called out again. It now has the same guarantee
+as the keyword path (a failing reply is logged and listening continues):
+
+- the failure goes to the dashboard log — `spontaneous call failed:
+  FileNotFoundError: No .wav clips in ...` — and to `journalctl`;
+- the thread keeps going, and **calls resume by themselves** once the problem
+  is fixed (`spontaneous calls are working again`);
+- because this repeats on a timer, a persistent problem is logged **once**, not
+  every cycle (a *different* failure is logged when it appears);
+- a failure always waits `ERROR_RETRY_SECONDS` (5 s) before the next attempt. A
+  bad config value fails instantly rather than after the usual random interval,
+  so without that wait the loop would spin at 100% CPU;
+- stopping the app is still prompt, even in the middle of that wait.
+
+## Missing or broken sound files
+
+A category with no `.wav` files (deleted, recordings not copied over yet), or a
+corrupt file, no longer stops the app from starting. That used to be fatal —
+the startup preload raised, the service exited, and under systemd it
+crash-looped with the dashboard down. Now:
+
+- at startup each empty category and each unreadable file is reported once, to
+  the console/`journalctl` and the dashboard log — `WARNING: no .wav clips in
+  .../shout — starting anyway; anything that picks 'shout' will fail (and be
+  logged) until you add some` — and skipped; everything else still loads;
+- using such a category later fails *at that moment*, where it's handled:
+  a keyword reply logs `response failed`, the spontaneous-call thread logs
+  `spontaneous call failed` once and keeps going, and the dashboard's **Trigger
+  now** button shows the actual reason in the red banner (`the response failed —
+  FileNotFoundError: No .wav clips in ...`) instead of an opaque "request
+  failed (500)";
+- add the files and it picks them up by itself — no restart. The clips load on
+  first use rather than being preloaded, so that one response is a touch slower.
+
+Good to know: a category that's empty still gets *chosen* by the random pick
+(the pick doesn't skip categories without files), so in `distress` mode roughly
+one call in three will fail while, say, `shout/` is empty — each reported, none
+fatal. Unchecking that category under "Voice sounds" avoids it.
+
+## Audio failures: speaker
+
+A stuck speaker/amp must not silently freeze the simulator. Playback is
+bounded: it's allowed the clip's own length plus 3 s to finish
+(`PLAYBACK_GRACE_SECONDS` in `audio_hal.py`; long clips get proportionally
+more time, so a healthy playback is never cut off). Past that the stream is
+aborted and the failure is logged as `PLAYBACK FAILED: ...` (dashboard log,
+`journalctl -u victimsim`); failing to open the output device at all is
+handled the same way. The microphone is unmuted, the cooldown still applies
+so a broken device isn't hammered, the failed attempt isn't counted as a
+response, and the next keyword tries again — so a device that comes back
+just starts working.
+
+Why it matters: sounddevice's `sd.wait()` has no timeout. Before this, a
+stalled output device blocked the responder forever — the mic stayed muted for
+the rest of the run and the process still looked alive to systemd, so nothing
+restarted it. That was seen for real during development on the laptop: an
+intermittent stall (hung twice, then — with the bound in place — reported once
+as `PLAYBACK FAILED ... stalled` and survived). It's rare (a handful of
+occurrences in dozens of runs, none in 900 back-to-back playbacks), seemed to
+follow heavy load, and is most likely this desktop's PipeWire audio layer not
+completing a short stream; the Pi talks to the HiFiBerry through ALSA, so it may
+never happen there — but if it does, it's now contained.
+
 ## Status as of today
 
 - Deployed and running on the real Pi 4B (`rvsp4`): HiFiBerry DAC+ and
@@ -389,6 +489,44 @@ judged by ear on the actual hardware.
   correctly) — **not yet judged by ear on real hardware with a real
   spoken keyword**, which is really the only way to feel whether the
   partial-result change actually feels snappier in practice.
+- Startup no longer dies on missing/corrupt sound files (see "Missing or broken
+  sound files"): reproduced first with the real `main()` pointed at a sound
+  directory with `shout/` emptied — it exited with code 1 — then fixed and
+  re-run: the app stays up, warns once at startup, and with `shout` forced to be
+  chosen the spontaneous thread logged the failure once across ~5 cycles, the
+  dashboard's Trigger button showed the reason in the banner, and copying
+  recordings in while running made it play them. 10 tests, mutation-checked (the
+  crash coming back, a corrupt file aborting the preload, the trigger unguarded
+  and silent startup are each caught). Same treatment for a corrupt `.wav`.
+- Spontaneous-call thread guarded (see "Audio failures: spontaneous calls"):
+  reproduced the silent death first (real Responder + SoundBank, a profile
+  that picks a category with no folder: thread dead, nothing in the
+  dashboard log), then fixed it and re-ran the same scenario — it survives,
+  logs once, and resumes by itself when the files return. 8 tests, mutation-
+  checked (no guard / log every failure / no wait after a failure are each
+  caught, the last one by a config-error test that would otherwise spin).
+- Microphone resilience (see "Audio failures: microphone"): the app now
+  starts and stays up without the microphone, reports why on the dashboard,
+  detects unplug/stall, re-scans devices and recovers by itself. 22 tests
+  (fake mic that stalls / ends / fails to open; the supervising loop with
+  scripted failures — backoff, no log spam, recovery, output-index refresh,
+  prompt shutdown, language switch mid-outage) with mutation checks — removing
+  the stall watchdog makes the test *hang*, i.e. it reproduces the original
+  problem. Also verified on real hardware: the callback stream delivers on this
+  laptop's microphone at the expected block size/rate; the real app started with
+  no microphone stays up with the dashboard reachable and the card red; and with
+  the microphone "appearing" later, the real PortAudio re-scan finds it,
+  listening resumes and real playback still works. **Not yet tried by actually
+  unplugging the ReSpeaker on the Pi** — worth doing.
+- Bounded audio playback (see "Audio failures: speaker"): a stalled or missing
+  output device now gives a logged `PLAYBACK FAILED` and carries on instead
+  of hanging the responder. Tested with a fake device (stall, stall that
+  ignores the abort, open failure, and a slow-but-healthy playback that must
+  not be cut off — mutation-checked: restoring the unbounded wait makes the
+  stall test hang) and on real PortAudio: a genuinely never-ending stream is
+  aborted after clip + grace, the device works normally afterwards, normal
+  playback timing is unchanged, and no threads are left behind. Not
+  exercised on the Pi's HiFiBerry.
 - Keyword replies: a heard keyword is now answered with dedicated sounds from
   `assets/sounds/reply/`, with the `cry` sounds standing in while that folder
   is empty (and switching over by themselves once real files appear). Covered
@@ -671,6 +809,16 @@ so the pipeline has something to play while you're setting up.
 - Real recordings only cover one or a few takes per category so far — more
   variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
   would help against repetition during longer training sessions.
+- Audio failure handling still doesn't cover: `sd.play()` itself blocking
+  while it opens the output device (no evidence it does; the observed stall was
+  in the wait); the random category pick doesn't avoid categories that have no
+  files (a failing pick is reported, not skipped over); an empty *knock* folder
+  makes any response that decides to knock fail entirely, voice included; and an
+  *output* device that is missing at startup, which still stops the app
+  (deliberately: falling back to the default output could route sound to the
+  wrong device without saying so). The microphone re-scan uses sounddevice's private `_terminate` /
+  `_initialize`, the approach its own FAQ suggests; a sounddevice upgrade could
+  change that. Not yet exercised with a real ReSpeaker being unplugged on the Pi.
 - Dashboard has no authentication and uses Flask's built-in dev server —
   fine for a trusted training-exercise WLAN, not for exposing beyond that.
 - Dashboard log is in-memory only (last 300 events, process lifetime) —

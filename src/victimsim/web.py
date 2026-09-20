@@ -11,6 +11,7 @@ need to lock it down further.
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
@@ -208,7 +209,14 @@ def create_app(state: SharedState) -> Flask:
     def manual_trigger():
         if state.responder is None or not state.responder.ready():
             return jsonify({"error": "still cooling down, try again shortly"}), 429
-        state.responder.respond("manual trigger from web dashboard")
+        try:
+            state.responder.respond("manual trigger from web dashboard")
+        except Exception as e:  # noqa: BLE001 — e.g. a sound category with no clips
+            traceback.print_exc()
+            message = f"{type(e).__name__}: {e}"
+            state.add_log("system", f"manual trigger failed: {message}")
+            # JSON, so the dashboard's banner shows the actual reason instead of "request failed (500)"
+            return jsonify({"error": f"the response failed — {message}"}), 500
         return jsonify(state.status())
 
     return app

@@ -151,15 +151,24 @@ class Responder:
         if self.state is not None:
             self.state.add_log("response", log_line)
 
+        played = False
         self.busy.set()
         try:
             audio_hal.play_blocking(
                 stereo, self.config.audio.playback_sample_rate, self.output_device
             )
+            played = True
+        except audio_hal.PlaybackError as e:
+            # A stalled or missing output device must not freeze or kill the
+            # simulator: say so loudly, unmute the mic, and keep running.
+            message = f"PLAYBACK FAILED: {e}"
+            print(message)
+            if self.state is not None:
+                self.state.add_log("system", message)
         finally:
             self.busy.clear()
-            self._last_response_at = time.monotonic()
-            if self.state is not None:
+            self._last_response_at = time.monotonic()  # cooldown applies even to a failed try
+            if self.state is not None and played:
                 self.state.note_response(
                     reason, f"{category} (reply stand-in)" if placeholder else category, play_knock
                 )

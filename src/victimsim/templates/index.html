@@ -219,8 +219,12 @@ async function pollStatus(force = false) {
     clockOffsetSeconds = (Date.now() / 1000) - s.server_time;
     document.getElementById('s-clock').textContent = fmtOffset(clockOffsetSeconds);
 
-    document.getElementById('s-listener').innerHTML =
-      `<span class="dot ${s.listener_ready ? 'ok' : 'bad'}"></span>${s.listener_ready ? 'listening' : 'not ready'}`;
+    // Text nodes, not innerHTML: the reason is free text (device names, exception messages).
+    const listenerEl = document.getElementById('s-listener');
+    const dot = document.createElement('span');
+    dot.className = 'dot ' + (s.listener_ready ? 'ok' : 'bad');
+    listenerEl.replaceChildren(dot, document.createTextNode(
+      s.listener_ready ? 'listening' : 'not ready' + (s.listener_error ? `: ${s.listener_error}` : '')));
     document.getElementById('s-uptime').textContent = Math.round(s.uptime_seconds) + 's';
     document.getElementById('s-last-heard').textContent = s.last_heard
       ? `"${s.last_heard.text}" (${fmtTs(s.last_heard.ts)})` : 'none yet';
@@ -285,7 +289,15 @@ async function pollLog() {
       sinceTs = Math.max(sinceTs, e.ts);
       const line = document.createElement('div');
       line.className = 'log-line';
-      line.innerHTML = `<span class="ts">${fmtTs(e.ts)}</span><span class="kind-${e.kind}">[${e.kind}]</span> ${e.message}`;
+      // Built from text nodes: messages contain recognized speech, device names and
+      // exception text, none of which should ever be interpreted as HTML.
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = fmtTs(e.ts);
+      const kind = document.createElement('span');
+      kind.className = `kind-${String(e.kind).replace(/[^a-z]/g, '')}`;
+      kind.textContent = `[${e.kind}]`;
+      line.append(ts, kind, document.createTextNode(' ' + e.message));
       logEl.appendChild(line);
     }
     if (entries.length) logEl.scrollTop = logEl.scrollHeight;

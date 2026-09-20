@@ -1,13 +1,21 @@
 """Non-interactive smoke test: exercises every module without needing a live
 mic conversation (useful in a headless sandbox / CI). Run the real thing with
 `python -m victimsim.main` once you're at a machine with a working mic+speakers.
+
+Playback is stubbed out by default: what these checks are about is the logic
+around it, and a desktop audio server that hiccups (seen for real: PipeWire
+occasionally never finishing a short stream) shouldn't be able to fail or hang
+them. One check at the end does exercise the real output device, tolerantly.
+Set SMOKE_REAL_AUDIO=1 to use real playback throughout (you'll hear it).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -53,6 +61,10 @@ def make_fast_bank(tmp_dir: Path, samplerate: int) -> SoundBank:
 def main():
     config = Config.load()
     check("config loads", lambda: None)
+
+    real_play_blocking = audio_hal.play_blocking
+    if not os.environ.get("SMOKE_REAL_AUDIO"):
+        audio_hal.play_blocking = lambda *_args, **_kwargs: None
 
     def _cooldown_default():
         assert config.trigger.cooldown_seconds == 5.0, config.trigger.cooldown_seconds
@@ -182,21 +194,28 @@ def main():
                 return json.dumps({"text": ""})
 
         class _FakeStream:
-            def __enter__(self):
-                return self
+            """Delivers audio through the callback, like the real (callback-based) stream."""
 
-            def __exit__(self, *exc):
-                return False
+            def __init__(self, **kwargs):
+                self.callback = kwargs["callback"]
 
-            def read(self, _block_size):
-                return b"\x00\x00", False
+            def start(self):
+                def feed():
+                    for _ in range(5):
+                        time.sleep(0.01)
+                        self.callback(b"\x00\x00" * 3200, 3200, None, None)
+
+                threading.Thread(target=feed, daemon=True).start()
+
+            def close(self, ignore_errors=True):
+                pass
 
         original_recognizer = listener_module.KaldiRecognizer
         original_stream = listener_module.sd.RawInputStream
         original_model = listener_module.Model
         try:
             listener_module.KaldiRecognizer = lambda *a, **kw: _FakeRecognizer()
-            listener_module.sd.RawInputStream = lambda *a, **kw: _FakeStream()
+            listener_module.sd.RawInputStream = lambda **kw: _FakeStream(**kw)
             listener_module.Model = lambda *a, **kw: object()
 
             kl = KeywordListener(
@@ -217,10 +236,11 @@ def main():
     check("keyword detection reacts to Vosk partial results, not just final", _partial_result_detection)
 
     def _preload_all_clips():
-        preloaded = audio_hal.preload_all_clips(
+        report = audio_hal.preload_all_clips(
             real_bank, [*config.trigger.response_categories, "knock"], config.audio.playback_sample_rate
         )
-        assert preloaded >= 4, preloaded  # at least one clip per shout/cry/moan/knock
+        assert report.loaded >= 4, report  # at least one clip per shout/cry/moan/knock
+        assert not report.empty and not report.unreadable, report
         cache_size_before = len(audio_hal._clip_cache)
         # Second pass should hit the cache, not touch disk again.
         audio_hal.preload_all_clips(
@@ -535,6 +555,19 @@ def main():
         assert any("could not save settings" in e.message for e in state.snapshot_log())
 
     check("a save failure is logged, not fatal", _unwritable_settings_path_does_not_break_the_dashboard)
+
+    def _real_output_device_finishes_or_fails_cleanly():
+        # The one check that touches the real speakers. A stall in the desktop audio
+        # server is not this project's bug, so it only *warns*; what must never happen
+        # is a hang, or an exception other than PlaybackError.
+        sr = config.audio.playback_sample_rate
+        try:
+            real_play_blocking(np.zeros((int(0.3 * sr), 2), dtype="float32"), sr, None)
+            print("     (real playback finished)")
+        except audio_hal.PlaybackError as e:
+            print(f"     WARNING: this machine's audio output misbehaved, and was contained: {e}")
+
+    check("real output device: playback finishes or fails cleanly, never hangs", _real_output_device_finishes_or_fails_cleanly)
 
     print("\nAll smoke checks passed.")
 

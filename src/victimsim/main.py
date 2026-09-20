@@ -12,11 +12,12 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from . import audio_hal, settings_store
 from .config import Config, DEFAULT_CONFIG_PATH, MODELS_DIR, MODEL_NAMES, download_hint
-from .listener import KeywordListener
+from .listener import KeywordListener, ListenerError
 from .responder import Responder
 from .sound_bank import SoundBank
 from .spontaneous import SpontaneousLoop
@@ -27,9 +28,29 @@ from .state import SharedState
 MODEL_MISSING_RETRY_SECONDS = 5
 
 
-def audio_loop(state: SharedState, input_device, output_device) -> None:
+MIC_RETRY_MIN_SECONDS = 1.0   # first retry after a microphone failure...
+MIC_RETRY_MAX_SECONDS = 10.0  # ...backing off to this, so a mic that stays gone isn't hammered
+
+
+def _sleep_unless_interrupted(state: SharedState, seconds: float) -> None:
+    """Sleeps, but wakes early on shutdown or a language-reload request."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if state.stop_event.is_set() or state.reload_event.is_set():
+            return
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+def audio_loop(state: SharedState) -> None:
     """Owns the listener lifecycle. Rebuilds the listener whenever
-    `state.reload_event` is set (language switched from the web dashboard)."""
+    `state.reload_event` is set (language switched from the web dashboard).
+
+    Never dies on a microphone problem: a mic that is missing at startup,
+    unplugged mid-session, or that stalls without an error is reported (log +
+    dashboard "not ready: <reason>") and retried with backoff — re-scanning the
+    audio devices each time, because PortAudio only sees USB devices that were
+    present when it initialized — until it comes back.
+    """
     warned_missing: set[str] = set()  # log a missing model once, not every retry
     while not state.stop_event.is_set():
         state.reload_event.clear()
@@ -38,6 +59,7 @@ def audio_loop(state: SharedState, input_device, output_device) -> None:
 
         if not model_path.exists():
             state.listener_ready = False
+            state.listener_error = f"language model '{language}' is not installed"
             if language not in warned_missing:
                 warned_missing.add(language)
                 message = (
@@ -55,30 +77,130 @@ def audio_loop(state: SharedState, input_device, output_device) -> None:
         listener = KeywordListener(
             model_path=model_path,
             samplerate=state.config.audio.mic_sample_rate,
-            device=input_device,
+            device=None,  # resolved fresh before every attempt, see below
             keywords=keywords,
             channels=state.config.audio.mic_channels,
             block_size=state.config.audio.mic_block_size,
         )
-        state.listener_ready = True
-        state.add_log("system", f"listener ready (language={language})")
+        _listen(state, listener, language)
 
-        while not state.stop_event.is_set() and not state.reload_event.is_set():
-            result = listener.wait_for_keyword(
-                mute_event=state.responder.busy, reload_event=state.reload_event
+    state.listener_ready = False
+    state.add_log("system", "audio loop stopped")
+
+
+def _listen(state: SharedState, listener: KeywordListener, language: str) -> None:
+    state.listener_ready = False
+    outage_since: float | None = None  # None = the mic is fine; else when it went away
+    last_reason: str | None = None
+    delay = MIC_RETRY_MIN_SECONDS
+
+    def on_ready() -> None:
+        # First audio block actually arrived: the mic is really delivering.
+        nonlocal outage_since, last_reason, delay
+        state.listener_ready = True
+        state.listener_error = None
+        delay = MIC_RETRY_MIN_SECONDS
+        if outage_since is None:
+            state.add_log("system", f"listener ready (language={language})")
+        else:
+            message = f"microphone is back after {time.monotonic() - outage_since:.0f}s — listening again (language={language})"
+            print(message)
+            state.add_log("system", message)
+            outage_since = last_reason = None
+
+    def on_failure(reason: str) -> None:
+        nonlocal outage_since, last_reason, delay
+        state.listener_ready = False
+        state.listener_error = reason
+        if outage_since is None:
+            outage_since = time.monotonic()
+            message = f"MICROPHONE UNAVAILABLE: {reason} — retrying with backoff, re-scanning audio devices each time"
+        elif reason != last_reason:
+            message = f"microphone still unavailable: {reason}"
+        else:
+            message = ""  # same problem as last attempt: don't spam the log
+        last_reason = reason
+        if message:
+            print(message)
+            state.add_log("system", message)
+
+        _sleep_unless_interrupted(state, delay)
+        delay = min(delay * 2, MIC_RETRY_MAX_SECONDS)
+        if state.stop_event.is_set() or state.reload_event.is_set():
+            return
+        try:
+            audio_hal.refresh_devices(after=lambda: _refresh_output_index(state))
+        except Exception as e:  # noqa: BLE001 — best effort; the next attempt reports what's still wrong
+            state.add_log("system", f"could not re-scan audio devices: {e}")
+
+    while not state.stop_event.is_set() and not state.reload_event.is_set():
+        try:
+            state.input_device = listener.device = audio_hal.resolve_device(
+                state.config.audio.input_device, "input"
             )
-            if result is None:
-                break  # reload requested (or stopping) — rebuild/exit outer loop
-            keyword, text = result
-            state.note_heard(keyword, text)
-            state.add_log("heard", f"heard '{text}' (matched '{keyword}')")
+            result = listener.wait_for_keyword(
+                mute_event=state.responder.busy, reload_event=state.reload_event, on_ready=on_ready
+            )
+        except (ListenerError, audio_hal.DeviceNotFoundError) as e:
+            on_failure(str(e))
+            continue
+        except Exception as e:  # noqa: BLE001 — a bug must not silently end listening either
+            traceback.print_exc()
+            on_failure(f"unexpected {type(e).__name__}: {e}")
+            continue
+
+        if result is None:
+            break  # reload requested (or stopping) — rebuild/exit outer loop
+        keyword, text = result
+        state.note_heard(keyword, text)
+        state.add_log("heard", f"heard '{text}' (matched '{keyword}')")
+        try:
             if state.responder.ready():
                 state.responder.respond(f"heard '{text}' (matched '{keyword}')", reply=True)
             else:
                 state.add_log("cooldown", f"heard '{text}' but still cooling down, ignored")
+        except Exception as e:  # noqa: BLE001 — e.g. an emptied sound folder: report it, keep listening
+            traceback.print_exc()
+            state.add_log("system", f"response failed: {type(e).__name__}: {e}")
 
-    state.listener_ready = False
-    state.add_log("system", "audio loop stopped")
+
+def _refresh_output_index(state: SharedState) -> None:
+    """After PortAudio re-scans, device indices can move: re-resolve the output
+    device by name so playback doesn't go to the wrong one."""
+    name = state.config.audio.output_device
+    if not name:
+        return
+    try:
+        index = audio_hal.resolve_device(name, "output")
+    except audio_hal.DeviceNotFoundError:
+        return  # keep the old index; a failing playback reports itself
+    state.output_device = state.responder.output_device = index
+
+
+def _preload_sounds(config: Config, sound_bank: SoundBank, state: SharedState) -> audio_hal.PreloadReport:
+    """Loads every sound into memory at startup. Missing or unreadable sounds are
+    warned about (console/journal + dashboard log) but never stop the app: a
+    crash here would put the service in a restart loop with the dashboard down,
+    exactly when you need it to see what's wrong."""
+    to_preload = [*config.trigger.response_categories, "knock"]
+    for extra in (config.trigger.reply_category, config.trigger.reply_fallback_category):
+        if extra not in to_preload and sound_bank.has_clips(extra):
+            to_preload.append(extra)
+    report = audio_hal.preload_all_clips(sound_bank, to_preload, config.audio.playback_sample_rate)
+
+    def warn(message: str) -> None:
+        print(f"WARNING: {message}")
+        state.add_log("system", f"WARNING: {message}")
+
+    for category in report.empty:
+        warn(
+            f"no .wav clips in {sound_bank.sounds_dir / category} — starting anyway; anything that "
+            f"picks '{category}' will fail (and be logged) until you add some"
+        )
+    for path, why in report.unreadable:
+        warn(f"could not load {path} ({why}) — skipped; if it is picked, that response will fail (and be logged)")
+    print(f"Preloaded {report.loaded} sound clips into memory (no disk I/O on the response path).")
+    return report
 
 
 def main() -> None:
@@ -106,11 +228,13 @@ def main() -> None:
     saved = settings_store.load(settings_path)
     restored = settings_store.apply(config, saved)
     ignored = [k for k in settings_store.snapshot(config) if k in saved and k not in restored]
-    input_device = audio_hal.resolve_device(config.audio.input_device, "input")
+    # Only the *output* device must exist to start. A missing microphone must not
+    # stop the app: it would crash-loop under systemd and take the dashboard down
+    # with it, exactly when you need the dashboard to see what's wrong. The audio
+    # loop reports it ("not ready: ...") and keeps retrying instead.
     output_device = audio_hal.resolve_device(config.audio.output_device, "output")
 
     state = SharedState(config)
-    state.input_device = input_device
     state.output_device = output_device
     state.settings_path = settings_path
     state.defaults = defaults
@@ -127,12 +251,7 @@ def main() -> None:
         state.add_log("system", note)
 
     sound_bank = SoundBank()
-    to_preload = [*config.trigger.response_categories, "knock"]
-    for extra in (config.trigger.reply_category, config.trigger.reply_fallback_category):
-        if extra not in to_preload and sound_bank.has_clips(extra):
-            to_preload.append(extra)
-    preloaded = audio_hal.preload_all_clips(sound_bank, to_preload, config.audio.playback_sample_rate)
-    print(f"Preloaded {preloaded} sound clips into memory (no disk I/O on the response path).")
+    _preload_sounds(config, sound_bank, state)
 
     responder = Responder(config, sound_bank, output_device, state=state)
     state.responder = responder
@@ -149,7 +268,7 @@ def main() -> None:
     spontaneous_loop.start()
 
     audio_thread = threading.Thread(
-        target=audio_loop, args=(state, input_device, output_device), daemon=True
+        target=audio_loop, args=(state,), daemon=True
     )
     audio_thread.start()
 

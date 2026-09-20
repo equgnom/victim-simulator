@@ -45,6 +45,9 @@ class SharedState:
         self.input_device: int | None = None
         self.output_device: int | None = None
         self.listener_ready = False
+        # Why it isn't listening (missing/stalled microphone, uninstalled language
+        # model...) — shown on the dashboard so it can be diagnosed from a phone.
+        self.listener_error: str | None = None
         self.last_heard: dict | None = None
         self.last_response: dict | None = None
         self.heard_count = 0
@@ -154,6 +157,7 @@ class SharedState:
                 "knock_probability_override": self.config.knock.probability_override,
                 "uptime_seconds": round(time.time() - self.started_at, 1),
                 "listener_ready": self.listener_ready,
+                "listener_error": self.listener_error,
                 "input_device": self.input_device,
                 "output_device": self.output_device,
                 "last_heard": self.last_heard,
