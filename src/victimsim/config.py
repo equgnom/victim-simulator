@@ -138,16 +138,52 @@ class MonitoringConfig:
 
 
 @dataclass
+class KnockSensorConfig:
+    """A physical "three knocks" trigger: a piezo vibration sensor (e.g. the
+    DollaTek 5V piezoelectric film vibration sensor switch module, TTL-level
+    output) wired to a GPIO pin lets a rescuer knock on the victim's housing
+    to get a reply instead of speaking a keyword — useful in noisy conditions,
+    or simply as a second, independent way in. Disabled by default: it's
+    real GPIO hardware that has to be wired up first (see the README).
+    """
+
+    enabled: bool = False
+    gpio_pin: int = 27
+    min_knocks: int = 3
+    # Knocks must land within this many seconds of each other to count as one
+    # pattern — three knocks spread over a minute are three separate accidents,
+    # not a deliberate signal.
+    window_seconds: float = 2.0
+    # Passed straight to gpiozero's bounce_time: ignores further edges for this
+    # long after one is seen, so a single knock's ringing/bounce on the piezo
+    # isn't counted as several.
+    debounce_seconds: float = 0.05
+    # Mutes the sensor without unclaiming the GPIO pin or restarting — a felt
+    # pattern is still counted and logged, just not answered. Toggle live from
+    # the dashboard's "Ignore knock sensor" checkbox (unlike `enabled` above,
+    # which is a wiring choice and needs a restart).
+    ignored: bool = False
+
+
+@dataclass
 class ApModeConfig:
     """Declares the desired standalone-WiFi-hotspot state. Applying it is a
     separate, explicit step (scripts/setup_wifi_ap.sh) — this config is just
     the single source of truth for SSID/password so the app and the setup
-    script never disagree."""
+    script never disagree.
+
+    `interface` is a USB WiFi dongle by default (e.g. "wlan1"), not the
+    Pi's onboard radio ("wlan0") — that keeps the onboard radio free to stay
+    connected to a normal router for SSH/`git pull`/maintenance while the
+    dongle serves the dashboard hotspot, so enabling this never disconnects
+    you. Set it to "wlan0" instead if you don't have a dongle and are fine
+    with the one-radio trade-off (see README, "Standalone WLAN").
+    """
 
     enabled: bool = False
     ssid: str = "VictimSim"
     password: str = "rescue1234"
-    interface: str = "wlan0"
+    interface: str = "wlan1"
 
 
 @dataclass
@@ -161,6 +197,7 @@ class Config:
     trigger: TriggerConfig
     behavior: BehaviorConfig
     knock: KnockConfig
+    knock_sensor: KnockSensorConfig
     web: WebConfig
     volume: VolumeConfig
     network: NetworkConfig
@@ -218,6 +255,7 @@ class Config:
             trigger=trigger,
             behavior=behavior,
             knock=KnockConfig(**raw.get("knock", {})),
+            knock_sensor=KnockSensorConfig(**raw.get("knock_sensor", {})),
             web=WebConfig(**raw.get("web", {})),
             volume=volume,
             network=network,

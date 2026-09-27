@@ -9,10 +9,16 @@
 #   bash scripts/setup_wifi_ap.sh           # enable (reads config.yaml)
 #   bash scripts/setup_wifi_ap.sh disable   # revert to normal WiFi client mode
 #
-# WARNING: a Raspberry Pi 4B has a single WiFi radio. Enabling this
-# DISCONNECTS any existing WiFi client connection on that radio — including
-# an SSH session over WiFi. Run this over Ethernet or a direct console, or
-# be ready to reconnect by joining the new hotspot network yourself.
+# Recommended setup: network.ap_mode.interface points at a USB WiFi dongle
+# (e.g. "wlan1"), so the hotspot runs there while the Pi's onboard "wlan0"
+# stays a normal WiFi client connected to your router (SSH, `git pull`,
+# maintenance) — nothing gets disconnected. If interface is instead the
+# radio currently carrying your connection to this Pi (typically true if
+# you only have the one onboard radio and set interface: wlan0), enabling
+# the hotspot DISCONNECTS that connection, including an SSH session over
+# WiFi — this script detects that case and warns before doing anything, but
+# be ready to reconnect by joining the new hotspot network yourself, or use
+# Ethernet/a direct console instead.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,10 +72,26 @@ echo "About to configure a WiFi hotspot:"
 echo "  SSID:      $SSID"
 echo "  Interface: $INTERFACE"
 echo ""
-echo "WARNING: this disconnects any existing WiFi client connection on"
-echo "$INTERFACE (including an SSH session over WiFi). It also sets the"
-echo "hotspot to autoconnect, so future reboots come up in AP mode too —"
-echo "run 'bash scripts/setup_wifi_ap.sh disable' any time to revert."
+
+# The interface actually carrying your route to this Pi right now (e.g. an
+# SSH-over-WiFi session) — if that's the same interface the hotspot would
+# use, this WILL disconnect it. A separate USB dongle (a different
+# interface than the one below) is unaffected: your route to the Pi stays up.
+ROUTE_IFACE="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+if [ -n "$ROUTE_IFACE" ] && [ "$ROUTE_IFACE" = "$INTERFACE" ]; then
+  echo "WARNING: $INTERFACE is also the interface carrying your current network"
+  echo "route to this Pi — enabling the hotspot on it WILL disconnect that"
+  echo "connection, including an SSH session over WiFi. Be ready to reconnect by"
+  echo "joining the new hotspot network yourself, or use Ethernet/a direct console."
+else
+  echo "This uses $INTERFACE, separate from the interface carrying your current"
+  echo "connection to this Pi (${ROUTE_IFACE:-none detected}) — that connection is"
+  echo "unaffected and stays up (e.g. SSH keeps working)."
+fi
+echo ""
+echo "This also sets the hotspot to autoconnect, so future reboots come up"
+echo "with it running too — run 'bash scripts/setup_wifi_ap.sh disable' any"
+echo "time to revert."
 read -r -p "Continue? [y/N] " REPLY
 case "$REPLY" in
   [yY]) ;;

@@ -152,6 +152,24 @@ def create_app(state: SharedState) -> Flask:
         )
         return jsonify(state.status())
 
+    @app.post("/api/knock-sensor-ignore")
+    def set_knock_sensor_ignore():
+        """Body: {"ignored": true/false} — mutes the physical knock sensor
+        without unclaiming the GPIO pin or restarting: a felt pattern is
+        still counted and logged, just not answered."""
+        data = request.get_json(silent=True) or {}
+        ignored = data.get("ignored")
+        if not isinstance(ignored, bool):
+            return jsonify({"error": "'ignored' must be true or false"}), 400
+        with state.lock:
+            state.config.knock_sensor.ignored = ignored
+        state.persist_settings()
+        state.add_log(
+            "system",
+            f"knock sensor {'muted' if ignored else 'unmuted'} via web dashboard",
+        )
+        return jsonify(state.status())
+
     @app.post("/api/reset-settings")
     def reset_settings():
         applied = state.reset_settings()

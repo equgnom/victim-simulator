@@ -3,21 +3,24 @@
 A training aid for search-and-rescue exercises: a Raspberry Pi listens for
 rescuers ("Hello? Anyone there?" / German supported too) and responds with a
 victim sound (shout, cry, moan) through a loudspeaker, and can drive a knock
-transducer as a secondary cue. It can also be switched into a mode where the
-victim calls out and knocks on its own, without waiting to be spoken to. A
-web dashboard, reachable from any device on the same WLAN, shows live status
-and a recognition log, and lets you change language/mode/volume or fire a
-test response without touching the Pi.
+transducer as a secondary cue. A rescuer can also get the same reply by
+physically knocking three times near a piezo vibration sensor, instead of
+speaking — see "Physical knock sensor" below. It can also be switched into a
+mode where the victim calls out and knocks on its own, without waiting to be
+spoken to. A web dashboard, reachable from any device on the same WLAN, shows
+live status and a recognition log, and lets you change language/mode/volume
+or fire a test response without touching the Pi.
 
 ## How it works
 
 ```
-ReSpeaker Lite (USB mic array)
-        |
-        v
-  KeywordListener (Vosk, offline speech recognition, en or de)
-        |  keyword detected ("hello"/"hallo", "rescue"/"rettung", ...)
-        v
+ReSpeaker Lite (USB mic array)       Piezo vibration sensor (GPIO)
+        |                                     |
+        v                                     v
+  KeywordListener (Vosk, offline         KnockSensorListener
+  speech recognition, en/de/it)          (3 knocks within 2s)
+        |  keyword detected                   |  knock pattern detected
+        v                                      v
      Responder  --cooldown-->  SoundBank (random clip, no immediate repeat)
         ^                              |
         |  (distress/weak modes only)  v
@@ -28,12 +31,16 @@ ReSpeaker Lite (USB mic array)
                           HiFiBerry (audio HAT) -> loudspeaker (left)
                                              + amp -> transducer (right)
 
-  SharedState (status, event log) <--- both KeywordListener and Responder
-        ^                                report into it
+  SharedState (status, event log) <--- KeywordListener, KnockSensorListener
+        ^                                and Responder all report into it
         |
   Web dashboard (Flask, reachable over WLAN) -- reads status/log,
   writes language/mode/volume/manual-trigger back into SharedState
 ```
+
+Both the spoken keyword and the physical knock pattern are answered the same
+way: the dedicated reply sounds (see "Keyword replies" below) — a rescuer can
+use whichever fits the situation.
 
 While a response is playing, the listener is muted (see `Responder.busy` in
 [`src/victimsim/responder.py`](src/victimsim/responder.py)) so the sim
@@ -197,6 +204,90 @@ unchecking "Cry" won't silence the cry *stand-in* for replies (it stops
 mattering once real reply files are in). The dashboard's **Trigger now**
 button is a generic test and still plays a random shout/cry/moan, not a reply.
 
+## Physical knock sensor
+
+A rescuer can also get the dedicated reply by physically **knocking three
+times** near the victim, instead of speaking a keyword — useful when it's too
+loud, too quiet, or otherwise easier to knock than talk. This uses a piezo
+vibration sensor module wired to a Raspberry Pi GPIO pin (tested with the
+**DollaTek 5V Piezoelectric Film Vibration Sensor Switch Module, TTL Level
+Output** — a comparator board with a piezo disc, `VCC`/`GND`/`DO` pins,
+marketed for Arduino; any similar TTL-output knock/vibration sensor module
+works the same way).
+
+**Disabled by default** — it's real hardware that has to be wired up first.
+Turn it on in `config.yaml`:
+
+```yaml
+knock_sensor:
+  enabled: false      # set true once wired up
+  gpio_pin: 27         # Broadcom (GPIO) numbering, not the physical pin number
+  min_knocks: 3
+  window_seconds: 2.0  # the 3 knocks must land within this many seconds of each other
+  debounce_seconds: 0.05
+```
+
+Turning it on/off, or changing the pin, is not a dashboard control — it's a
+wiring choice, so it stays in `config.yaml` + restart. The dashboard's
+**Knock sensor** status card shows whether the pin was claimed successfully
+(green = ready, red = not ready with why — e.g. `gpiozero is not installed`
+or a busy pin) and how many knock patterns have been felt so far, the same
+way the **Listener** card reports the microphone.
+
+**Ignore knock sensor** (dashboard checkbox, next to "Knocking mode") mutes
+it *without* unclaiming the pin or restarting — for when the sensor is wired
+up and working, but you don't want a stray knock (someone leaning on the
+housing, transport, a training exercise where only voice should count)
+triggering a reply right now. A felt pattern while muted is still counted
+and logged (`... — ignored (knock sensor muted via dashboard)`), it just
+doesn't play a reply; the status card turns red and shows "muted". Like the
+other dashboard toggles, it's saved to `runtime_settings.json` and survives
+a restart, and "Reset to defaults" clears it back to `config.yaml`'s value
+(`knock_sensor.ignored`, default `false`).
+
+### Wiring
+
+⚠️ **Voltage warning:** this module is marketed for Arduino (5V logic). The
+Pi's GPIO pins are **3.3V only and not 5V-tolerant** — driving one with a real
+5V signal can damage it. The simplest safe option, and the one that's been
+used here: power the sensor module from the Pi's **3V3** pin instead of 5V.
+These comparator-based modules run fine down to 3.3V and their digital output
+then swings 0–3.3V, which is directly GPIO-safe. If your particular module
+needs a genuine 5V supply to be sensitive enough, put a level shifter (or a
+simple two-resistor voltage divider, e.g. 10kΩ over 20kΩ) on the `DO` line
+between the sensor and the Pi instead of feeding 5V straight into a GPIO pin.
+
+| Sensor pin | Pi pin |
+|---|---|
+| VCC | 3V3 (physical pin 1 or 17) |
+| GND | GND (e.g. physical pin 9) |
+| DO  | GPIO27 (physical pin 13) — or whatever `gpio_pin` is set to |
+
+Pick a GPIO pin that's free on your board: avoid GPIO2/GPIO3 (I2C) and
+GPIO18-21 (I2S, used by the HiFiBerry audio HAT). GPIO27 is free on a
+standard HiFiBerry AMP2 setup and is the config default.
+
+On Raspberry Pi OS Bookworm, gpiozero's default GPIO backend needs
+`python3-lgpio` (or `pip install lgpio` inside the venv):
+
+```bash
+sudo apt-get install -y python3-lgpio
+```
+
+### What's covered, what isn't
+
+The knock-pattern timing logic (`KnockPatternDetector` in
+[`src/victimsim/knock_sensor.py`](src/victimsim/knock_sensor.py)) and the
+GPIO wiring itself are unit-tested using gpiozero's own `MockFactory` pin
+backend (see [`tests/test_knock_sensor.py`](tests/test_knock_sensor.py)) —
+real `Button`/debounce/pull-down behavior, just without a real Pi. The
+supervising loop that claims the pin, retries with backoff if it's busy or
+gpiozero isn't installed, and answers a detected pattern (or logs "still
+cooling down" during the cooldown) is tested the same way `audio_loop`'s
+microphone handling is. **Not yet tried against a real DollaTek module on
+real Pi GPIO** — the debounce time and knock window (2s default) may need
+tuning once you can actually tap on the real sensor.
+
 ## Voice sound selection
 
 `trigger.enabled_categories` in `config.yaml`, or the "Voice sounds"
@@ -226,8 +317,9 @@ the readout keeps showing the real value.
 ## Persistent dashboard settings
 
 Everything you change from the dashboard — language, behavior mode, voice
-and knock volume, knocking mode, the knock-chance override, cooldown, and
-the voice-sound checkboxes — is saved immediately to `runtime_settings.json` in the repo root and
+and knock volume, knocking mode, the knock-chance override, cooldown, the
+voice-sound checkboxes, and whether the knock sensor is muted — is saved
+immediately to `runtime_settings.json` in the repo root and
 re-applied on the next start. So a service restart, a crash-loop recovery,
 a power cycle, or a lost WiFi/phone connection all come back up with your
 latest configuration instead of falling back to `config.yaml`. (Losing the
@@ -235,13 +327,13 @@ WiFi connection alone never reset anything — the app just keeps running with
 its in-memory settings — but a restart used to.)
 
 - **Precedence:** `config.yaml` provides the defaults, `runtime_settings.json`
-  layers on top of it. That means editing one of these eight values in
+  layers on top of it. That means editing one of these nine values in
   `config.yaml` has *no visible effect* once it's been saved from the
   dashboard — the saved value wins. The startup log/console says
   `restored saved dashboard settings from runtime_settings.json: ...` so
   you can tell when that's happening.
 - **Reset to `config.yaml`'s values:** the dashboard's **Reset to defaults**
-  button (asks for confirmation). It puts all eight settings back to what
+  button (asks for confirmation). It puts all nine settings back to what
   `config.yaml` says, takes effect immediately (switching the listener's
   language back if needed), and deletes the saved file so a restart doesn't
   bring the old values back. Without a browser at hand, the equivalent is
@@ -278,27 +370,32 @@ no equivalent warning possible for the amp/DAC chip itself.
 
 ## Log time vs. the Pi's clock
 
-The Pi has no battery-backed RTC, and in standalone AP mode it has no
-internet for NTP either — its system clock can end up wrong, sometimes by
-hours (it just keeps whatever time it had when it lost power/network, via
-`fake-hwclock`; if that was itself never synced, it can be arbitrarily
-off). Rather than show that raw, possibly-wrong time, the dashboard
-compares the server's reported time (`server_time` in `/api/status`)
-against the viewing device's own clock on every poll, and shifts every
-displayed timestamp (log entries, last-heard/last-response) by that
-offset — so what you see matches your phone/laptop's clock, not the Pi's.
-The "Clock" status card shows the current offset (`in sync`, or e.g.
-`+3h 17m 0s (Pi clock)`), so you can tell at a glance whether — and how
-much — the Pi's clock is off, and it self-corrects live if the Pi's clock
-later gets fixed (e.g. it regains internet and NTP syncs mid-session).
+The Pi has no battery-backed RTC. In a field exercise it's expected to be
+connected to nothing but the dongle's hotspot (see "Standalone WLAN") —
+`wlan0` only connects to a router during a separate maintenance window
+before/after, not during the exercise itself — so there's no internet and
+no NTP while it matters, and the system clock can end up wrong, sometimes
+by hours (it just keeps whatever time it had when it lost power/network,
+via `fake-hwclock`; if that was itself never synced, it can be arbitrarily
+off). This is exactly the situation the dashboard's time handling is built
+for, unrelated to which interface is in use: rather than show that raw,
+possibly-wrong time, it compares the server's reported time (`server_time`
+in `/api/status`) against the *viewing device's own clock* on every poll,
+and shifts every displayed timestamp (log entries, last-heard/last-response)
+by that offset — so what a rescuer sees on their phone matches their own
+phone's clock, not the Pi's, with no internet involved at all. The "Clock"
+status card shows the current offset (`in sync`, or e.g. `+3h 17m 0s (Pi
+clock)`), so you can tell at a glance whether — and how much — the Pi's
+clock is off, and it self-corrects live if the Pi's clock later gets fixed
+(e.g. it regains internet and NTP syncs during a maintenance window).
 
 This only corrects what's *displayed* — it doesn't change the Pi's actual
 system clock, so anything else that reads it directly (`journalctl`
 timestamps, file mtimes) still shows the Pi's own, potentially-wrong time.
-If you want the underlying clock itself fixed, connect the Pi to the
-internet (client WiFi mode, not the AP) at least once before a session so
-NTP can sync it — `fake-hwclock` then keeps it close across reboots even
-without further internet access.
+If you want the underlying clock itself fixed, connect `wlan0` to a router
+(a maintenance window, not the AP) at least once before heading into the
+field so NTP can sync it — `fake-hwclock` then keeps it close across
+reboots even without further internet access.
 
 ## Detection-to-response latency
 
@@ -576,6 +673,52 @@ never happen there — but if it does, it's now contained.
   real on the Pi** (it needs `nmcli` and touches live network state, which
   isn't something to exercise from here; try it there and let me know how
   it goes, especially the SSH-over-WiFi disconnect behavior).
+- Physical "three knocks" trigger added (see "Physical knock sensor"): a
+  piezo vibration sensor wired to a GPIO pin answers a knock pattern with the
+  same dedicated reply a spoken keyword gets. Built with the same resilience
+  as the microphone path — gpiozero missing, the pin busy, or the sensor not
+  wired up yet is reported on the dashboard's new **Knock sensor** card and
+  retried with backoff, never crashes the app. 13 tests: the pattern-timing
+  logic (window, reset-after-firing) in isolation; the GPIO wiring itself
+  exercised through gpiozero's real `MockFactory` pin backend rather than a
+  hand-rolled fake (three simulated pin pulses correctly fire the detector
+  through the real `Button`/debounce/pull-down code, two don't); and the
+  supervising loop (retry/backoff on a busy pin, cooldown, a failing reply
+  not killing the loop) — plus 2 mutation checks (dropping the pattern-reset,
+  and the cooldown guard) confirmed each is actually caught. Live-tested in
+  the real running app (real Flask dashboard, real `Responder`, GPIO backed
+  by `MockFactory` instead of real hardware): the dashboard's Knock sensor
+  card correctly showed "ready" after startup. **Not yet tried against a
+  real DollaTek module on real Pi GPIO**, and not yet driven through a full
+  live knock-to-audio round trip in the running app — worth doing, and the
+  debounce/window defaults may need tuning once you can actually tap the
+  real sensor.
+- Dashboard "Ignore knock sensor" checkbox added: mutes a felt knock pattern
+  (still counted and logged, just not answered) without unclaiming the GPIO
+  pin or restarting, persisted like the other dashboard settings and cleared
+  by "Reset to defaults". Covered by the same test layers as the sensor
+  itself: the supervising loop's mute check (a muted pattern isn't answered
+  but is still counted, and toggling it live mid-session takes effect
+  without reopening the pin — mutation-checked, dropping the mute guard
+  makes the test fail), the settings roundtrip/persistence tests, and the
+  `/api/knock-sensor-ignore` endpoint's validation in the smoke test.
+  Live-tested in the real running app: checking the dashboard box flips the
+  **Knock sensor** card to red/"muted" immediately and logs "knock sensor
+  muted via web dashboard"; unchecking it reverts to green/"ready" — both
+  confirmed in a real browser against the real Flask app.
+- Standalone WLAN reworked for a dual-radio setup (see "Standalone WLAN"):
+  `network.ap_mode.interface` now defaults to a USB WiFi dongle (e.g.
+  `wlan1`) instead of the Pi's onboard `wlan0`, so the onboard radio can
+  stay a normal WiFi client (SSH, `git pull`, maintenance) while the dongle
+  runs the dashboard hotspot — enabling it no longer has to disconnect
+  anything. `scripts/setup_wifi_ap.sh` now checks which interface is
+  actually carrying the current route to the Pi and only shows the
+  disconnect warning if that matches the hotspot interface (i.e. the
+  no-dongle, single-radio case); otherwise it says the connection is
+  unaffected. The one-radio fallback (`interface: wlan0`, no dongle) still
+  works exactly as before. **Not yet run for real on the Pi with an actual
+  USB dongle** — the interface-name detection (`nmcli device status`) and
+  the route-based warning logic haven't been checked against real hardware.
 - **Not yet tested**: a live "say hello, hear it respond" session over
   actual WLAN from a second device with a person speaking near the
   ReSpeaker (dashboard + manual trigger are confirmed; the full mic ->
@@ -664,7 +807,18 @@ you'll need a different transducer output path (a second small amp off a
 GPIO PWM pin, or a second audio HAT) — the code's `knock_channel` config
 exists so this is a one-line config change once you decide.
 
-### 5. Get the code running
+### 5. Knock sensor (optional)
+
+Only needed if you're using the physical "three knocks" trigger — see
+"Physical knock sensor" above for wiring (power it from **3V3, not 5V**) and
+the `knock_sensor` block in `config.yaml`. Skip this step and leave
+`knock_sensor.enabled: false` if you're not using it.
+
+```bash
+sudo apt-get install -y python3-lgpio
+```
+
+### 6. Get the code running
 
 ```bash
 git clone https://github.com/equgnom/victim-simulator.git
@@ -683,7 +837,7 @@ Note the exact input/output device names from that output, then edit
 substrings that uniquely match them (e.g. `"ReSpeaker"` / `"snd_rpi_hifiberry"`),
 and `audio.mic_channels` per step 3.
 
-### 6. Try it
+### 7. Try it
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m victimsim.main
@@ -693,9 +847,11 @@ It prints the dashboard URL including the Pi's WLAN IP — open that from a
 phone or laptop on the same network. If the Pi has a firewall (`ufw`)
 enabled, allow the port first: `sudo ufw allow 8080/tcp`. Say a keyword near
 the mic, or use the dashboard's "Trigger now" button, to confirm playback
-through the real speaker/transducer.
+through the real speaker/transducer. If the knock sensor is wired up and
+enabled, the dashboard's **Knock sensor** card should show green/"ready" at
+startup; knock three times near it to confirm a reply plays.
 
-### 7. Auto-start on boot
+### 8. Auto-start on boot
 
 A systemd unit is included at [`deploy/victimsim.service`](deploy/victimsim.service).
 Edit its `User=`, `WorkingDirectory=`, and `Environment=PYTHONPATH=...` if
@@ -718,39 +874,63 @@ that's live-adjustable: language, mode, volume).
 ## Standalone WLAN (Pi as its own WiFi hotspot)
 
 For field use with no external router available, the Pi can broadcast its
-own WiFi network so a phone connects directly to reach the dashboard.
+own WiFi network so a phone connects directly to reach the dashboard. In an
+actual exercise, expect the Pi to be reachable **only** through this
+hotspot — no router in range, no internet — so make sure whatever you need
+(the correct language model, updated code, a synced clock, see "Log time
+vs. the Pi's clock") is already in place before heading out.
 
-**Before you run this**: a Pi 4B has a single WiFi radio. Enabling the
-hotspot disconnects any existing WiFi client connection on that radio —
-**including an SSH session over WiFi**. Do this over Ethernet, a direct
-console (keyboard/monitor), or be ready to immediately reconnect by joining
-the new hotspot network yourself. It also sets the hotspot to autoconnect,
-so it comes up in AP mode on every future boot too, not just this once.
+**Recommended: a second radio via a USB WiFi dongle.** Plug in a USB WiFi
+dongle and use it for the hotspot, while the Pi's onboard radio (`wlan0`)
+is free to join a router — for SSH, `git pull`, NTP, and everything else
+covered under "Deploying to the Pi 4B" — during a maintenance window before
+or after the exercise. The benefit during setup/testing is immediate:
+enabling the hotspot on the dongle never disconnects your `wlan0` session,
+so you can safely toggle it on and off while still connected. It doesn't
+mean the Pi has internet *during* the exercise itself — in the field
+`wlan0` typically has no router to join either, dongle or not. Find the
+dongle's interface name with `nmcli device status` or `ip link` (commonly
+`wlan1`, though some dongles get a predictable name instead, e.g.
+`wlx00e04c680123` — use whatever actually shows up) and set it in
+`config.yaml`:
 
-1. Set your SSID/password under `network.ap_mode` in `config.yaml` (change
-   the default password — it's committed to the repo as a placeholder):
-   ```yaml
-   network:
-     ap_mode:
-       enabled: true
-       ssid: "VictimSim"
-       password: "your-own-password-here"   # 8+ chars, WPA2
-       interface: wlan0
-   ```
+```yaml
+network:
+  ap_mode:
+    enabled: true
+    ssid: "VictimSim"
+    password: "your-own-password-here"   # 8+ chars, WPA2
+    interface: wlan1   # the USB dongle — not wlan0
+```
+
+**No dongle? A Pi 4B's onboard radio can still do it alone**, at a cost:
+set `interface: wlan0` instead, and understand that enabling the hotspot
+then disconnects any existing WiFi client connection on that same
+radio — **including an SSH session over WiFi**. Do this over Ethernet, a
+direct console (keyboard/monitor), or be ready to immediately reconnect by
+joining the new hotspot network yourself.
+
+Either way, this also sets the hotspot to autoconnect, so it comes up on
+every future boot too, not just this once.
+
+1. Set `network.ap_mode` in `config.yaml` as above (change the default
+   password — it's committed to the repo as a placeholder).
 2. Apply it — this is a separate, explicit step, not something the app does
    on its own:
    ```bash
    bash scripts/setup_wifi_ap.sh
    ```
-   It reads the config above, warns you about the disconnect, asks for
-   confirmation, then sets up a NetworkManager hotspot connection
-   (`nmcli`) and brings it up.
+   It reads the config above, checks whether the chosen interface is the
+   one currently carrying your connection to the Pi and warns if so (see
+   above), asks for confirmation, then sets up a NetworkManager hotspot
+   connection (`nmcli`) and brings it up.
 3. On your phone: connect to the `VictimSim` WiFi network, then browse to
    the address the script prints (NetworkManager's shared-mode gateway,
    typically `http://10.42.0.1:8080`).
 
-To revert to normal WiFi client mode (e.g. to get the Pi back online at
-home for maintenance):
+To revert to normal WiFi client mode on the hotspot's radio (only needed
+for the single-radio, no-dongle setup — with a dongle, `wlan0` was never
+touched and stays connected the whole time):
 ```bash
 bash scripts/setup_wifi_ap.sh disable
 ```
@@ -809,6 +989,11 @@ so the pipeline has something to play while you're setting up.
 - Real recordings only cover one or a few takes per category so far — more
   variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
   would help against repetition during longer training sessions.
+- The physical knock sensor is untested on real hardware (GPIO wiring and
+  the pattern-timing logic are both tested against gpiozero's `MockFactory`,
+  see "Physical knock sensor"). There's also no dashboard control to
+  enable/disable it or change the pin live — it's a `config.yaml` + restart
+  setting, deliberately, since it's a wiring choice.
 - Audio failure handling still doesn't cover: `sd.play()` itself blocking
   while it opens the output device (no evidence it does; the observed stall was
   in the wait); the random category pick doesn't avoid categories that have no

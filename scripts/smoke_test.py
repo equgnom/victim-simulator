@@ -381,6 +381,12 @@ def main():
         assert state.config.knock.loop_enabled is True
         client.post("/api/knock-loop", json={"enabled": False})
 
+        assert client.post("/api/knock-sensor-ignore", json={"ignored": "yes"}).status_code == 400
+        assert client.post("/api/knock-sensor-ignore", json={"ignored": True}).status_code == 200
+        assert state.config.knock_sensor.ignored is True
+        assert client.get("/api/status").get_json()["knock_sensor_ignored"] is True
+        client.post("/api/knock-sensor-ignore", json={"ignored": False})
+
         assert client.post("/api/cooldown", json={"cooldown_seconds": "nope"}).status_code == 400
         assert client.post("/api/cooldown", json={"cooldown_seconds": -1}).status_code == 400
         assert client.post("/api/cooldown", json={"cooldown_seconds": 301}).status_code == 400
@@ -471,6 +477,7 @@ def main():
         assert client.post("/api/knock-probability", json={"probability": 1}).status_code == 200
         assert client.post("/api/cooldown", json={"cooldown_seconds": 11}).status_code == 200
         assert client.post("/api/voice-categories", json={"enabled_categories": ["cry"]}).status_code == 200
+        assert client.post("/api/knock-sensor-ignore", json={"ignored": True}).status_code == 200
 
         # A rejected request must not clobber what was saved.
         assert client.post("/api/mode", json={"mode": "bogus"}).status_code == 400
@@ -480,7 +487,7 @@ def main():
         fresh = Config.load()
         assert fresh.behavior.mode == "responsive" and fresh.trigger.cooldown_seconds == 5.0
         applied = settings_store.apply(fresh, settings_store.load(settings_path))
-        assert len(applied) == 8, applied
+        assert len(applied) == 9, applied
         assert fresh.behavior.mode == "weak"
         assert fresh.language == "it"
         assert (fresh.volume.voice, fresh.volume.knock) == (0.3, 0.6)
@@ -488,6 +495,7 @@ def main():
         assert fresh.knock.probability_override == 1.0
         assert fresh.trigger.cooldown_seconds == 11
         assert fresh.trigger.enabled_categories == ["cry"]
+        assert fresh.knock_sensor.ignored is True
 
     check("dashboard changes are saved and restored after a restart", _settings_persist_across_restart)
 
@@ -528,6 +536,7 @@ def main():
             ("/api/knock-probability", {"probability": 1}),
             ("/api/cooldown", {"cooldown_seconds": 9}),
             ("/api/voice-categories", {"enabled_categories": ["cry"]}),
+            ("/api/knock-sensor-ignore", {"ignored": True}),
         ):
             assert client.post(url, json=body).status_code == 200, url
         assert settings_path.exists()

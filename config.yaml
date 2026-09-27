@@ -85,6 +85,24 @@ behavior:
       response_categories: [moan, cry]
       knock_probability: 0.15
 
+# Physical "three knocks" trigger: a piezo vibration sensor (e.g. the
+# DollaTek 5V piezoelectric film vibration sensor switch module, TTL-level
+# output) wired to a GPIO pin lets a rescuer knock on the victim's housing
+# to get a reply instead of speaking a keyword. Disabled by default — it's
+# real hardware that has to be wired up first (see README, "Physical knock
+# sensor"). gpio_pin uses Broadcom (GPIO) numbering, not physical pin
+# numbers; avoid GPIO2/3 (I2C) and GPIO18-21 (I2S, used by the HiFiBerry).
+knock_sensor:
+  enabled: false
+  gpio_pin: 27
+  min_knocks: 3
+  window_seconds: 2.0
+  debounce_seconds: 0.05
+  # Mutes a felt knock pattern (still counted/logged, just not answered)
+  # without unclaiming the pin. Adjustable live from the dashboard's "Ignore
+  # knock sensor" checkbox.
+  ignored: false
+
 knock:
   enabled: true
   probability: 0.5         # base knock chance for "responsive" mode
@@ -121,13 +139,20 @@ volume:
 # reach the dashboard directly, with no external router needed (e.g. in the
 # field during a training exercise). This section only declares the desired
 # SSID/password — applying it is a separate, explicit step:
-# `bash scripts/setup_wifi_ap.sh` (see README). A Pi 4B has a single WiFi
-# radio, so enabling this disconnects any existing WiFi client connection
-# (including an SSH session over WiFi) — the script warns about this and
-# asks for confirmation before doing anything.
+# `bash scripts/setup_wifi_ap.sh` (see README).
+#
+# `interface` targets a USB WiFi dongle (commonly "wlan1" — check with
+# `nmcli device status`), not the Pi's onboard "wlan0" radio: the onboard
+# radio stays a normal WiFi client connected to your router (SSH,
+# `git pull`, software maintenance), and the dongle broadcasts the hotspot
+# for the dashboard — so enabling this never disconnects you. If you don't
+# have a dongle, set this to "wlan0" instead; the Pi 4B then has only one
+# WiFi radio, and enabling the hotspot on it disconnects any existing WiFi
+# client connection there (including an SSH session over WiFi) — the script
+# detects and warns about this before doing anything.
 network:
   ap_mode:
     enabled: false
     ssid: "VictimSim"
     password: "rescue1234"   # WPA2-PSK — change this, 8+ chars required
-    interface: wlan0
+    interface: wlan1

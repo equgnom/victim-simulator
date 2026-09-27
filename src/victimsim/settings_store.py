@@ -38,6 +38,7 @@ def snapshot(config: Config) -> dict:
         "knock_probability_override": config.knock.probability_override,
         "cooldown_seconds": config.trigger.cooldown_seconds,
         "enabled_categories": list(config.trigger.enabled_categories),
+        "knock_sensor_ignored": config.knock_sensor.ignored,
     }
 
 
@@ -140,5 +141,9 @@ def apply(config: Config, data: dict, models_dir: Path | None = None) -> list[st
         if kept:  # at least one must stay enabled, same rule as the dashboard
             config.trigger.enabled_categories = kept
             applied.append("enabled_categories")
+
+    if isinstance(data.get("knock_sensor_ignored"), bool):
+        config.knock_sensor.ignored = data["knock_sensor_ignored"]
+        applied.append("knock_sensor_ignored")
 
     return applied

@@ -4,3 +4,4 @@ soundfile>=0.12
 vosk>=0.3.45
 PyYAML>=6.0
 Flask>=3.0
+gpiozero>=2.0

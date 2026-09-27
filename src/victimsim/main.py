@@ -15,7 +15,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import audio_hal, settings_store
+from . import audio_hal, knock_sensor, settings_store
 from .config import Config, DEFAULT_CONFIG_PATH, MODELS_DIR, MODEL_NAMES, download_hint
 from .listener import KeywordListener, ListenerError
 from .responder import Responder
@@ -30,6 +30,9 @@ MODEL_MISSING_RETRY_SECONDS = 5
 
 MIC_RETRY_MIN_SECONDS = 1.0   # first retry after a microphone failure...
 MIC_RETRY_MAX_SECONDS = 10.0  # ...backing off to this, so a mic that stays gone isn't hammered
+
+KNOCK_SENSOR_RETRY_MIN_SECONDS = 1.0   # first retry after the GPIO pin couldn't be opened...
+KNOCK_SENSOR_RETRY_MAX_SECONDS = 30.0  # ...backing off to this — it's not wired up yet on most devices
 
 
 def _sleep_unless_interrupted(state: SharedState, seconds: float) -> None:
@@ -177,6 +180,85 @@ def _refresh_output_index(state: SharedState) -> None:
     state.output_device = state.responder.output_device = index
 
 
+def _knock_sensor_loop(state: SharedState) -> None:
+    """Owns the physical knock-sensor lifecycle, mirroring audio_loop's
+    resilience for the microphone: gpiozero not being installed, the GPIO
+    pin being busy, or the sensor simply not being wired up yet must not
+    crash the app or take the dashboard down — it's reported ("not ready:
+    <reason>") and retried with backoff instead. Returns immediately if the
+    feature is off (the default — it's real hardware that has to be wired
+    up first).
+
+    Unlike the microphone, once the pin is successfully claimed there is
+    nothing to poll: gpiozero delivers knocks via its own callback thread,
+    so this just holds the pin open until shutdown. `config.knock_sensor.ignored`
+    (the dashboard's "Ignore knock sensor" checkbox) is read fresh on every
+    detected pattern, muting the reply without unclaiming the pin.
+    """
+    cfg = state.config.knock_sensor
+    if not cfg.enabled:
+        return
+
+    def on_pattern() -> None:
+        reason = f"felt {cfg.min_knocks} knocks on the vibration sensor"
+        state.note_knock_sensor_hit()
+        state.add_log("heard", reason)
+        if cfg.ignored:
+            state.add_log("system", f"{reason} — ignored (knock sensor muted via dashboard)")
+            return
+        try:
+            if state.responder.ready():
+                state.responder.respond(reason, reply=True)
+            else:
+                state.add_log("cooldown", f"{reason} but still cooling down, ignored")
+        except Exception as e:  # noqa: BLE001 — e.g. an emptied sound folder: report it, keep listening
+            traceback.print_exc()
+            state.add_log("system", f"response to knock sensor failed: {type(e).__name__}: {e}")
+
+    delay = KNOCK_SENSOR_RETRY_MIN_SECONDS
+    last_reason: str | None = None
+    while not state.stop_event.is_set():
+        try:
+            listener = knock_sensor.KnockSensorListener(
+                pin=cfg.gpio_pin,
+                debounce_seconds=cfg.debounce_seconds,
+                min_knocks=cfg.min_knocks,
+                window_seconds=cfg.window_seconds,
+                on_knock_pattern=on_pattern,
+            )
+        except knock_sensor.KnockSensorError as e:
+            reason = str(e)
+            state.knock_sensor_ready = False
+            state.knock_sensor_error = reason
+            if reason != last_reason:
+                last_reason = reason
+                message = f"KNOCK SENSOR UNAVAILABLE: {reason} — retrying with backoff"
+                print(message)
+                state.add_log("system", message)
+            if state.stop_event.wait(delay):
+                return
+            delay = min(delay * 2, KNOCK_SENSOR_RETRY_MAX_SECONDS)
+            continue
+
+        delay = KNOCK_SENSOR_RETRY_MIN_SECONDS
+        state.knock_sensor_ready = True
+        state.knock_sensor_error = None
+        message = (
+            "knock sensor is back" if last_reason is not None
+            else f"knock sensor ready on GPIO{cfg.gpio_pin} "
+            f"(waiting for {cfg.min_knocks} knocks within {cfg.window_seconds:.0f}s)"
+        )
+        last_reason = None
+        print(message)
+        state.add_log("system", message)
+        try:
+            state.stop_event.wait()  # callback-driven from here; just keep the pin claimed
+        finally:
+            listener.close()
+
+    state.knock_sensor_ready = False
+
+
 def _preload_sounds(config: Config, sound_bank: SoundBank, state: SharedState) -> audio_hal.PreloadReport:
     """Loads every sound into memory at startup. Missing or unreadable sounds are
     warned about (console/journal + dashboard log) but never stop the app: a
@@ -271,6 +353,11 @@ def main() -> None:
         target=audio_loop, args=(state,), daemon=True
     )
     audio_thread.start()
+
+    knock_sensor_thread = threading.Thread(
+        target=_knock_sensor_loop, args=(state,), daemon=True
+    )
+    knock_sensor_thread.start()
 
     print(
         f"Responsive Victim Simulator running (language={config.language}, "

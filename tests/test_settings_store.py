@@ -31,6 +31,7 @@ def test_roundtrip_restores_every_setting(config: Config, tmp_path: Path, models
     config.knock.probability_override = 1.0
     config.trigger.cooldown_seconds = 12
     config.trigger.enabled_categories = ["moan"]
+    config.knock_sensor.ignored = True
 
     path = tmp_path / "settings.json"
     settings_store.save(path, settings_store.snapshot(config))
@@ -42,7 +43,7 @@ def test_roundtrip_restores_every_setting(config: Config, tmp_path: Path, models
     assert set(applied) == {
         "language", "mode", "voice_volume", "knock_volume",
         "knock_loop_enabled", "knock_probability_override", "cooldown_seconds",
-        "enabled_categories",
+        "enabled_categories", "knock_sensor_ignored",
     }
     assert fresh.language == "de"
     assert fresh.behavior.mode == "weak"
@@ -52,6 +53,7 @@ def test_roundtrip_restores_every_setting(config: Config, tmp_path: Path, models
     assert fresh.knock.probability_override == 1.0
     assert fresh.trigger.cooldown_seconds == 12
     assert fresh.trigger.enabled_categories == ["moan"]
+    assert fresh.knock_sensor.ignored is True
 
 
 def test_missing_file_means_no_overrides(tmp_path: Path):
@@ -78,6 +80,7 @@ def test_invalid_entries_are_dropped_individually(config: Config, models_dir: Pa
             "voice_volume": True,                  # bool is not a number
             "knock_volume": "loud",                # not a number
             "knock_loop_enabled": "yes",           # not a bool
+            "knock_sensor_ignored": "yes",         # not a bool
             "knock_probability_override": 7,       # out of range
             "cooldown_seconds": 9999,              # out of range
             "enabled_categories": ["nope", 3],     # nothing valid left
@@ -151,6 +154,13 @@ def test_knock_override_rejects_non_numbers_and_out_of_range(config: Config, mod
     for bad in ("1", True, -0.1, 1.5, [1]):
         assert settings_store.apply(config, {"knock_probability_override": bad}, models_dir=models_dir) == []
         assert config.knock.probability_override is None
+
+
+def test_knock_sensor_ignored_false_is_applied_not_treated_as_missing(config: Config, models_dir: Path):
+    config.knock_sensor.ignored = True
+    applied = settings_store.apply(config, {"knock_sensor_ignored": False}, models_dir=models_dir)
+    assert applied == ["knock_sensor_ignored"]
+    assert config.knock_sensor.ignored is False
 
 
 def test_clear_deletes_the_file_and_tolerates_a_missing_one(tmp_path: Path):

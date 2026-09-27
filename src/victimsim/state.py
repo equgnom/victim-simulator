@@ -53,6 +53,13 @@ class SharedState:
         self.heard_count = 0
         self.response_count = 0
 
+        # Physical "three knocks" sensor (see knock_sensor.py) — same idea as
+        # listener_ready/listener_error above, for the GPIO knock detector.
+        self.knock_sensor_ready = False
+        self.knock_sensor_error: str | None = None
+        self.last_knock_sensor_hit: dict | None = None
+        self.knock_sensor_hit_count = 0
+
         self.log: deque[LogEntry] = deque(maxlen=log_capacity)
         self.stop_event = threading.Event()
         self.reload_event = threading.Event()
@@ -118,6 +125,11 @@ class SharedState:
             }
             self.response_count += 1
 
+    def note_knock_sensor_hit(self) -> None:
+        with self.lock:
+            self.last_knock_sensor_hit = {"ts": time.time()}
+            self.knock_sensor_hit_count += 1
+
     def _check_cpu_temp_warning(self, temp: float | None) -> bool:
         """Edge-triggered: logs once when crossing into/out of the warning
         zone, not on every poll."""
@@ -164,6 +176,12 @@ class SharedState:
                 "last_response": self.last_response,
                 "heard_count": self.heard_count,
                 "response_count": self.response_count,
+                "knock_sensor_enabled": self.config.knock_sensor.enabled,
+                "knock_sensor_ignored": self.config.knock_sensor.ignored,
+                "knock_sensor_ready": self.knock_sensor_ready,
+                "knock_sensor_error": self.knock_sensor_error,
+                "knock_sensor_hit_count": self.knock_sensor_hit_count,
+                "last_knock_sensor_hit": self.last_knock_sensor_hit,
                 "cpu_temp_c": cpu_temp_c,
                 "cpu_temp_warning": cpu_temp_warning,
                 "cpu_temp_warning_threshold_c": self.config.monitoring.cpu_temp_warning_c,
