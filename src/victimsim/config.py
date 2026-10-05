@@ -156,8 +156,13 @@ class KnockSensorConfig:
     window_seconds: float = 2.0
     # Passed straight to gpiozero's bounce_time: ignores further edges for this
     # long after one is seen, so a single knock's ringing/bounce on the piezo
-    # isn't counted as several.
-    debounce_seconds: float = 0.05
+    # isn't counted as several. Must be shorter than the sensor's own pulse
+    # width, or the whole knock gets debounced away as noise and nothing is
+    # ever detected — measured ~18ms on a real DollaTek module (an
+    # oscilloscope on the DO line settled it), so this default leaves
+    # headroom under that; a different sensor model may need retuning the
+    # same way (see README, "Physical knock sensor").
+    debounce_seconds: float = 0.005
     # Mutes the sensor without unclaiming the GPIO pin or restarting — a felt
     # pattern is still counted and logged, just not answered. Toggle live from
     # the dashboard's "Ignore knock sensor" checkbox (unlike `enabled` above,

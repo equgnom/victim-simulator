@@ -224,7 +224,7 @@ knock_sensor:
   gpio_pin: 27         # Broadcom (GPIO) numbering, not the physical pin number
   min_knocks: 3
   window_seconds: 2.0  # the 3 knocks must land within this many seconds of each other
-  debounce_seconds: 0.05
+  debounce_seconds: 0.005
 ```
 
 Turning it on/off, or changing the pin, is not a dashboard control — it's a
@@ -267,12 +267,34 @@ Pick a GPIO pin that's free on your board: avoid GPIO2/GPIO3 (I2C) and
 GPIO18-21 (I2S, used by the HiFiBerry audio HAT). GPIO27 is free on a
 standard HiFiBerry AMP2 setup and is the config default.
 
-On Raspberry Pi OS Bookworm, gpiozero's default GPIO backend needs
-`python3-lgpio` (or `pip install lgpio` inside the venv):
+On Raspberry Pi OS Bookworm (kernel 6.1+), gpiozero needs the `lgpio`
+backend — without it, it silently falls back to its older "native" GPIO
+implementation, which is **incompatible with recent kernels** and fails
+with `OSError: [Errno 22] Invalid argument` the moment it tries to claim
+the pin (confirmed on a real Pi 4B, kernel 6.18). `sudo apt-get install -y
+python3-lgpio` installs it for the *system* Python, which this project's
+venv can't see — install it into the venv instead, which needs a C
+toolchain plus the underlying C library's headers:
 
 ```bash
-sudo apt-get install -y python3-lgpio
+sudo apt-get install -y swig liblgpio-dev python3-dev gcc
+cd ~/victim-simulator
+.venv/bin/pip install lgpio
 ```
+
+Confirm it actually claims the pin before trusting the dashboard:
+```bash
+.venv/bin/python3 -c "
+import lgpio
+h = lgpio.gpiochip_open(0)
+lgpio.gpio_claim_input(h, 27)   # use your configured gpio_pin
+print('claimed OK, value:', lgpio.gpio_read(h, 27))
+lgpio.gpio_free(h, 27)
+lgpio.gpiochip_close(h)
+"
+```
+If `liblgpio-dev` isn't found, `apt-cache search lgpio` and install
+whatever package actually provides the library on your OS release.
 
 ### What's covered, what isn't
 
@@ -284,9 +306,26 @@ real `Button`/debounce/pull-down behavior, just without a real Pi. The
 supervising loop that claims the pin, retries with backoff if it's busy or
 gpiozero isn't installed, and answers a detected pattern (or logs "still
 cooling down" during the cooldown) is tested the same way `audio_loop`'s
-microphone handling is. **Not yet tried against a real DollaTek module on
-real Pi GPIO** — the debounce time and knock window (2s default) may need
-tuning once you can actually tap on the real sensor.
+microphone handling is.
+
+**Confirmed working end to end on real hardware** (Pi 4B, real DollaTek
+module, real `config.yaml`-driven app): three real knocks play the real
+dedicated reply through the real speaker. Getting there surfaced two things
+worth knowing if you're setting this up fresh:
+- The `lgpio` install needs the full recipe above (`swig` +
+  `liblgpio-dev`, `pip install` *inside the venv*) — `sudo apt-get install
+  -y python3-lgpio` alone looks like it should work (no error) but silently
+  leaves the venv without a working GPIO backend, which only surfaces later
+  as `OSError: [Errno 22] Invalid argument` when a pin is claimed.
+- `debounce_seconds` must be shorter than the sensor's actual pulse width.
+  The dashboard showing "ready" only means the GPIO pin opened — it says
+  nothing about detection actually working. If knocks don't register, check
+  the pulse width with an oscilloscope (or gpiozero's `DigitalInputDevice`
+  with `bounce_time=None` plus a tight polling loop, bypassing debounce
+  entirely, to confirm the signal arrives before chasing anything else) and
+  lower `debounce_seconds` below it — `0.005` (the shipped default) is
+  confirmed working against a real DollaTek module, whose pulse measured
+  under 18ms on an oscilloscope.
 
 ## Voice sound selection
 
@@ -688,11 +727,24 @@ never happen there — but if it does, it's now contained.
   and the cooldown guard) confirmed each is actually caught. Live-tested in
   the real running app (real Flask dashboard, real `Responder`, GPIO backed
   by `MockFactory` instead of real hardware): the dashboard's Knock sensor
-  card correctly showed "ready" after startup. **Not yet tried against a
-  real DollaTek module on real Pi GPIO**, and not yet driven through a full
-  live knock-to-audio round trip in the running app — worth doing, and the
-  debounce/window defaults may need tuning once you can actually tap the
-  real sensor.
+  card correctly showed "ready" after startup.
+- **Now confirmed on real hardware** (Pi 4B, real DollaTek module): three
+  real knocks play the real dedicated reply through the real speaker, full
+  round trip. Getting there needed two fixes, now folded into the docs and
+  the shipped default: (1) the `lgpio` GPIO backend needs `swig` +
+  `liblgpio-dev` and `pip install lgpio` *inside the venv* — the originally
+  documented `sudo apt-get install -y python3-lgpio` alone leaves the venv
+  with no working backend, silently, until a pin claim fails with `OSError:
+  [Errno 22] Invalid argument`; (2) the default `debounce_seconds` (50ms)
+  was longer than the real module's pulse width (measured <18ms on an
+  oscilloscope), so gpiozero filtered every knock out as debounce noise —
+  the dashboard still showed "ready" the whole time, since that only means
+  the pin opened, not that detection works. Default lowered to `0.005`
+  (5ms), confirmed working. Diagnosed by bypassing debounce and the alert
+  callback entirely (a raw polling loop reading `.value` at 2kHz) to prove
+  the signal does reach GPIO27 before chasing anything else — that also
+  caught a wiring mix-up along the way (easy to land on the wrong physical
+  pin two over from the intended one).
 - Dashboard "Ignore knock sensor" checkbox added: mutes a felt knock pattern
   (still counted and logged, just not answered) without unclaiming the GPIO
   pin or restarting, persisted like the other dashboard settings and cleared
@@ -810,13 +862,14 @@ exists so this is a one-line config change once you decide.
 ### 5. Knock sensor (optional)
 
 Only needed if you're using the physical "three knocks" trigger — see
-"Physical knock sensor" above for wiring (power it from **3V3, not 5V**) and
-the `knock_sensor` block in `config.yaml`. Skip this step and leave
-`knock_sensor.enabled: false` if you're not using it.
-
-```bash
-sudo apt-get install -y python3-lgpio
-```
+"Physical knock sensor" above for wiring (power it from **3V3, not 5V**), the
+`knock_sensor` block in `config.yaml`, and the full `lgpio` install recipe
+(it needs more than just the apt package — see "Wiring" in that section).
+Skip this step and leave `knock_sensor.enabled: false` if you're not using
+it. After wiring it up and setting `enabled: true`, if the dashboard's
+**Knock sensor** card says "ready" but knocking three times does nothing,
+it's almost certainly `debounce_seconds` — see "What's covered, what isn't"
+in that same section.
 
 ### 6. Get the code running
 
@@ -989,11 +1042,13 @@ so the pipeline has something to play while you're setting up.
 - Real recordings only cover one or a few takes per category so far — more
   variety (and a genuinely weak/exhausted-sounding take for `weak` mode)
   would help against repetition during longer training sessions.
-- The physical knock sensor is untested on real hardware (GPIO wiring and
-  the pattern-timing logic are both tested against gpiozero's `MockFactory`,
-  see "Physical knock sensor"). There's also no dashboard control to
-  enable/disable it or change the pin live — it's a `config.yaml` + restart
-  setting, deliberately, since it's a wiring choice.
+- The physical knock sensor is now confirmed working end to end on real
+  hardware, but `debounce_seconds` is per-sensor-model (it must stay under
+  that sensor's pulse width — see "Physical knock sensor") and only one
+  module has actually been measured, so a different module may need its
+  own value. There's also no dashboard control to enable/disable it or
+  change the pin live — it's a `config.yaml` + restart setting, deliberately,
+  since it's a wiring choice.
 - Audio failure handling still doesn't cover: `sd.play()` itself blocking
   while it opens the output device (no evidence it does; the observed stall was
   in the wait); the random category pick doesn't avoid categories that have no

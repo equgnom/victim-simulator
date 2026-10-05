@@ -97,7 +97,13 @@ knock_sensor:
   gpio_pin: 27
   min_knocks: 3
   window_seconds: 2.0
-  debounce_seconds: 0.05
+  # Must be shorter than the sensor's own pulse width, or the knock gets
+  # filtered out as debounce noise and nothing is ever detected. 0.005
+  # (5ms) is confirmed working on a real DollaTek module (measured pulse
+  # ~18ms on an oscilloscope) — a different sensor may need retuning the
+  # same way: if "ready" shows on the dashboard but knocks never register,
+  # this is the first thing to lower.
+  debounce_seconds: 0.005
   # Mutes a felt knock pattern (still counted/logged, just not answered)
   # without unclaiming the pin. Adjustable live from the dashboard's "Ignore
   # knock sensor" checkbox.
