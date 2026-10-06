@@ -995,6 +995,58 @@ intent (whether AP mode is turned on and its SSID) — it doesn't actively
 verify the hotspot is live, since that's a one-time infrastructure step
 independent of whether the app happens to be running.
 
+## Field power-loss hardening
+
+In the field, "shutting down" the Pi means pulling power, not a clean
+`sudo shutdown` — there's no screen/keyboard, and no graceful-shutdown
+workflow built into the hardware. That's fine for most of what's running
+(see below), but worth deliberately hardening against rather than
+discovering the hard way mid-exercise.
+
+**Make the root filesystem read-only — the single biggest lever:**
+```bash
+sudo raspi-config nonint do_overlayfs 0
+sudo reboot
+```
+This routes all writes to a RAM-backed overlay that's discarded on reboot,
+so the base OS has nothing on the SD card to corrupt when power is pulled.
+The trade-off: anything written while running — including this project's
+own `runtime_settings.json` — would also vanish on the next boot unless you
+carve out `~/victim-simulator` (or `/home`) as a separate writable area
+excluded from the overlay when you set it up; `raspi-config`'s overlay
+setup lets you choose which filesystem stays writable. Without that carve-out,
+dashboard changes would silently reset to `config.yaml`'s values on every
+reboot — reasonable for some deployments, not for others, so decide
+deliberately rather than by accident.
+
+**Already hardened, nothing to change:**
+- `runtime_settings.json` is written via a tempfile + `fsync` + atomic
+  `os.replace` (`settings_store.save()`), specifically so a power cut
+  mid-write can't leave a truncated or corrupt file — worst case you lose
+  that one write, the file itself is never left broken.
+- The systemd journal on this image is volatile (RAM-only, confirmed via
+  `journalctl --list-boots` showing no persistent journal), so there's
+  nothing there to corrupt either — the trade-off is no log history across
+  a power cycle, which is a reasonable fit for a training device.
+- NetworkManager's `.nmconnection` files are only written while a
+  connection is actively being changed. If nothing's being reconfigured at
+  the moment power is pulled (the normal case: it's just sitting there
+  running), there's nothing mid-write to corrupt. Just avoid live network
+  reconfiguration (`nmcli`, `scripts/setup_wifi_ap.sh`) right before a
+  planned power-off if you can help it.
+
+**Worth considering, not required:**
+- A physical safe-shutdown button, if the housing allows it: a push-button
+  on a spare GPIO pin running a small systemd service that calls `shutdown
+  now` on a press, with an LED that goes off once it's safe to cut power.
+  This is the one change that removes the risk at the root instead of just
+  containing it — "press button, wait for the LED, then pull power" instead
+  of pulling power live. Not implemented here; would need its own GPIO pin
+  distinct from `knock_sensor.gpio_pin`.
+- A "High Endurance"-rated SD card (or booting from a USB SSD instead)
+  holds up meaningfully better than a typical consumer card under repeated
+  abrupt power loss, independent of any of the above.
+
 ## Running tests
 
 ```bash
